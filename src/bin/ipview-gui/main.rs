@@ -11,6 +11,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod columns;
 mod detail;
 mod filters;
 mod loader;

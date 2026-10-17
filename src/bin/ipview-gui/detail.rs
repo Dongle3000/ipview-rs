@@ -81,7 +81,7 @@ pub fn show(ui: &mut Ui, t: &Ticket) {
     });
 }
 
-fn group_title(g: Group) -> &'static str {
+pub fn group_title(g: Group) -> &'static str {
     match g {
         Group::Ticket => "Ticket",
         Group::Quality => "Quality",

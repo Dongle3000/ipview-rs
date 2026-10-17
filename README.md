@@ -12,6 +12,7 @@ delay, jitter delay, E-model MOS), and writes `.ipv` files the original can stil
 cargo build --release        # binary: target/release/ipview
 cargo test                   # unit tests
 IPVIEW_SAMPLES=~/ipview cargo test --release   # also check a directory of real files
+IPVIEW_SNAPSHOT_DIR=/tmp/shots cargo test --bin ipview-gui   # GUI tests, saving rendered images
 ```
 
 ## Usage
@@ -45,6 +46,9 @@ Filter panel on the left (MOS, loss, equipment, codec, phone number, IP or IP pa
 plus free field conditions with AND/OR), sortable ticket grid with MOS/loss coloring, and
 all fields of the selected ticket on the right with distributions as bar charts.
 View > Statistics summarizes the visible tickets. Right-click a cell to filter on its value.
+Right-click a column header to sort ascending/descending, add a filter on that column (pick an
+operator, type a value, Enter), remove its filters, move or hide it. The Columns button above the
+table (also in the header menu) picks columns by group; View > Columns also reorders them.
 File menu: open/add files or folders, save visible tickets as `.ipv`, export CSV/JSON.
 Keys as in IPView: F3 open, F6 clear filters, F8 clear database; arrow keys move the selection.
 Columns, sort order, filters and the CSV delimiter are remembered between sessions.

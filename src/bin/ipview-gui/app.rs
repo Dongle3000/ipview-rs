@@ -10,6 +10,7 @@ use ipview::filter::Op;
 use ipview::stats::{MOS_BANDS, Stats, Summary};
 use ipview::ticket::{self, Ticket, Value};
 
+use crate::columns::{self, HeaderAction, HeaderFilterDraft, HeaderMenu};
 use crate::filters::{self, Choices, FilterState};
 use crate::loader::Loader;
 use crate::{detail, style};
@@ -58,6 +59,7 @@ pub struct App {
     stats: Option<Stats>,
     /// Scroll the table to the selection on the next frame.
     scroll_to_selected: bool,
+    header_draft: HeaderFilterDraft,
     screenshot: Option<crate::Screenshot>,
 }
 
@@ -87,6 +89,7 @@ impl App {
             show_about: false,
             stats: None,
             scroll_to_selected: false,
+            header_draft: HeaderFilterDraft::default(),
             screenshot,
         };
         if !paths.is_empty() {
@@ -356,6 +359,11 @@ impl App {
             return;
         }
 
+        ui.horizontal(|ui| {
+            columns::picker_button(ui, &mut self.settings.columns);
+            ui.label(RichText::new("Right-click a column header to sort, filter, move or hide it.").weak().small());
+        });
+
         let columns: Vec<&'static Field> = self.settings.columns.iter().filter_map(|&id| fields::by_id(id)).collect();
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
 
@@ -389,11 +397,12 @@ impl App {
         }
 
         let mut clicked_sort = None;
+        let mut header_action = None;
         let mut new_condition = None;
         let mut clicked_row = None;
         table
             .header(row_height + 4.0, |mut header| {
-                for f in &columns {
+                for (position, f) in columns.iter().enumerate() {
                     header.col(|ui| {
                         let sorted = self.settings.sort.filter(|(id, _)| *id == f.id).map(|(_, desc)| desc);
                         let label = match f.unit {
@@ -405,10 +414,32 @@ impl App {
                         }
                         let r = ui
                             .add(egui::Label::new(RichText::new(label).strong()).sense(egui::Sense::click()))
-                            .on_hover_text(format!("{} (field {}). Click to sort.", f.name, f.id));
+                            .on_hover_text(format!(
+                                "{} (field {}). Click to sort, right-click for options.",
+                                f.name, f.id
+                            ));
                         if r.clicked() {
                             clicked_sort = Some(f.id);
                         }
+                        let filters_on_field =
+                            self.settings.filters.conditions.iter().filter(|c| c.field == f.id).count();
+                        // Stays open while choosing an operator or typing; actions close it.
+                        let popup =
+                            egui::Popup::context_menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                        popup.show(|ui| {
+                            let menu = HeaderMenu {
+                                field: f,
+                                sort: self.settings.sort,
+                                position,
+                                column_count: columns.len(),
+                                filters_on_field,
+                                draft: &mut self.header_draft,
+                                columns: &mut self.settings.columns,
+                            };
+                            if let Some(a) = menu.show(ui) {
+                                header_action = Some(a);
+                            }
+                        });
                     });
                 }
             })
@@ -471,6 +502,34 @@ impl App {
             self.settings.filters.conditions.push(c);
             self.refresh();
         }
+        self.header_draft.frame_end();
+        if let Some(action) = header_action {
+            self.apply_header_action(action);
+        }
+    }
+
+    fn apply_header_action(&mut self, action: HeaderAction) {
+        let cols = &mut self.settings.columns;
+        match action {
+            HeaderAction::Sort { field, descending } => self.settings.sort = Some((field, descending)),
+            HeaderAction::ClearSort => self.settings.sort = None,
+            HeaderAction::AddFilter(c) => self.settings.filters.conditions.push(c),
+            HeaderAction::RemoveFilters(field) => self.settings.filters.conditions.retain(|c| c.field != field),
+            HeaderAction::Move { field, by } => {
+                if let Some(i) = cols.iter().position(|&c| c == field) {
+                    let j = i.saturating_add_signed(by).min(cols.len() - 1);
+                    cols.swap(i, j);
+                }
+                return;
+            }
+            HeaderAction::Hide(field) => {
+                if cols.len() > 1 {
+                    cols.retain(|&c| c != field);
+                }
+                return;
+            }
+        }
+        self.refresh();
     }
 
     fn columns_window(&mut self, ctx: &egui::Context) {
@@ -487,7 +546,7 @@ impl App {
                     if ui.small_button("Down").clicked() {
                         action = Some((i, 1));
                     }
-                    if ui.small_button("×").clicked() {
+                    if ui.add_enabled(self.settings.columns.len() > 1, egui::Button::new("×").small()).clicked() {
                         action = Some((i, 0));
                     }
                     ui.label(name);
@@ -505,23 +564,8 @@ impl App {
                 }
             }
             ui.separator();
-            ui.horizontal(|ui| {
-                let mut add = None;
-                egui::ComboBox::from_id_salt("add_column").selected_text("Add column…").width(220.0).show_ui(
-                    ui,
-                    |ui| {
-                        for f in fields::FIELDS.iter().filter(|f| !self.settings.columns.contains(&f.id)) {
-                            if ui.selectable_label(false, f.name).clicked() {
-                                add = Some(f.id);
-                            }
-                        }
-                    },
-                );
-                self.settings.columns.extend(add);
-                if ui.button("Defaults").clicked() {
-                    self.settings.columns = fields::DEFAULT_COLUMNS.to_vec();
-                }
-            });
+            ui.label("Available columns:");
+            columns::picker(ui, &mut self.settings.columns);
         });
         self.show_columns = open;
     }
@@ -716,5 +760,153 @@ impl eframe::App for App {
         if self.screenshot.is_none() {
             eframe::set_value(storage, SETTINGS_KEY, &self.settings);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    fn tlv(entries: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (id, v) in entries {
+            out.extend(id.to_le_bytes());
+            out.push(v.len() as u8);
+            out.extend(*v);
+        }
+        out
+    }
+
+    /// Three G.711 calls with different durations.
+    fn tickets() -> Vec<Ticket> {
+        [(5u16, 100u32), (30, 101), (10, 102)]
+            .iter()
+            .map(|&(duration, time)| {
+                Ticket::from_raw(&tlv(&[
+                    (1, &(1_790_000_000 + time).to_be_bytes()),
+                    (12, &duration.to_be_bytes()),
+                    (15, &[0]),
+                    (20, &[20]),
+                    (22, &500u32.to_be_bytes()),
+                    (24, &0u16.to_be_bytes()),
+                ]))
+            })
+            .collect()
+    }
+
+    fn harness() -> Harness<'static, App> {
+        let mut h = Harness::builder().with_size([1300.0, 800.0]).build_eframe(|cc| {
+            let mut app = App::new(cc, Vec::new(), None);
+            app.settings = Settings::default();
+            app.tickets = tickets();
+            app.choices = Choices::from_tickets(&app.tickets);
+            app.refresh();
+            app
+        });
+        h.run();
+        h
+    }
+
+    fn durations(h: &Harness<'_, App>) -> Vec<u16> {
+        let app = h.state();
+        app.visible.iter().map(|&i| app.tickets[i].u16(12).unwrap()).collect()
+    }
+
+    /// Saves a rendered image when IPVIEW_SNAPSHOT_DIR is set (needs a wgpu adapter).
+    fn snapshot(h: &mut Harness<'_, App>, name: &str) {
+        if let Some(dir) = std::env::var_os("IPVIEW_SNAPSHOT_DIR") {
+            let image = h.render().expect("render");
+            image.save(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    #[test]
+    fn header_menu_sorts() {
+        let mut h = harness();
+        assert_eq!(durations(&h), [5, 30, 10]);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        snapshot(&mut h, "header_menu");
+        h.get_by_label("Sort descending").click();
+        h.run();
+        assert_eq!(h.state().settings.sort, Some((12, true)));
+        assert_eq!(durations(&h), [30, 10, 5]);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        h.get_by_label("Sort ascending").click();
+        h.run();
+        assert_eq!(durations(&h), [5, 10, 30]);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        h.get_by_label("Clear sorting").click();
+        h.run();
+        assert_eq!(h.state().settings.sort, None);
+    }
+
+    #[test]
+    fn header_menu_filters_by_typing() {
+        let mut h = harness();
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        // The value field keeps keyboard focus after picking an operator.
+        h.get_by_label("≥").click();
+        h.run();
+        h.event(egui::Event::Text("10".into()));
+        h.run();
+        h.key_press(Key::Enter);
+        h.run();
+        let conditions = &h.state().settings.filters.conditions;
+        assert_eq!(conditions.len(), 1, "{:?}", conditions.iter().map(|c| &c.value).collect::<Vec<_>>());
+        assert_eq!((conditions[0].field, conditions[0].op, conditions[0].value.as_str()), (12, Op::Ge, "10"));
+        assert_eq!(durations(&h), [30, 10]);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        h.get_by_label("Remove filters on this column (1)").click();
+        h.run();
+        assert!(h.state().settings.filters.conditions.is_empty());
+        assert_eq!(durations(&h).len(), 3);
+    }
+
+    #[test]
+    fn header_menu_moves_and_hides_columns() {
+        let mut h = harness();
+        let pos = |h: &Harness<'_, App>| h.state().settings.columns.iter().position(|&c| c == 12).unwrap();
+        let start = pos(&h);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        h.get_by_label("Move left").click();
+        h.run();
+        assert_eq!(pos(&h), start - 1);
+
+        h.get_by_label("Dur. [s]").click_secondary();
+        h.run();
+        h.get_by_label("Hide column").click();
+        h.run();
+        assert!(!h.state().settings.columns.contains(&12));
+    }
+
+    #[test]
+    fn column_picker_adds_and_removes() {
+        let mut h = harness();
+        assert!(!h.state().settings.columns.contains(&15));
+        h.get_by_label("Columns").click();
+        h.run();
+        snapshot(&mut h, "column_picker");
+        h.get_by_label("Compression type").scroll_to_me();
+        h.run();
+        h.get_by_label("Compression type").click();
+        h.run();
+        assert!(h.state().settings.columns.contains(&15));
+        // The picker stays open; the new column header has the same name, so pick the checkbox.
+        h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Compression type").click();
+        h.run();
+        assert!(!h.state().settings.columns.contains(&15));
     }
 }

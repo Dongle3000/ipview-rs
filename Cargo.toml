@@ -36,3 +36,6 @@ gui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:image"]
 
 [profile.release]
 strip = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }

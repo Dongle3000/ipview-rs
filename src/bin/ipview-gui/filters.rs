@@ -171,11 +171,13 @@ pub fn panel(ui: &mut Ui, state: &mut FilterState, choices: &Choices) -> bool {
 
     section(ui, "Quality", |ui| {
         egui::Grid::new("quality").num_columns(2).show(ui, |ui| {
-            ui.label("MOS ≤");
-            ui.add(egui::TextEdit::singleline(&mut state.mos_max).desired_width(70.0).hint_text("e.g. 3.6"));
+            let l = ui.label("MOS ≤");
+            ui.add(egui::TextEdit::singleline(&mut state.mos_max).desired_width(70.0).hint_text("e.g. 3.6"))
+                .labelled_by(l.id);
             ui.end_row();
-            ui.label("Loss % ≥");
-            ui.add(egui::TextEdit::singleline(&mut state.loss_min).desired_width(70.0).hint_text("e.g. 1"));
+            let l = ui.label("Loss % ≥");
+            ui.add(egui::TextEdit::singleline(&mut state.loss_min).desired_width(70.0).hint_text("e.g. 1"))
+                .labelled_by(l.id);
             ui.end_row();
         });
         ui.checkbox(&mut state.jitter_corrupt_only, "Only implausible jitter counters");
@@ -183,36 +185,41 @@ pub fn panel(ui: &mut Ui, state: &mut FilterState, choices: &Choices) -> bool {
 
     section(ui, "Call", |ui| {
         egui::Grid::new("call").num_columns(2).show(ui, |ui| {
-            ui.label("Equipment");
-            choice(ui, "equipment", &mut state.equipment, &choices.equipment);
+            let l = ui.label("Equipment");
+            choice(ui, "equipment", &mut state.equipment, &choices.equipment).labelled_by(l.id);
             ui.end_row();
-            ui.label("Codec");
-            choice(ui, "codec", &mut state.codec, &choices.codecs);
+            let l = ui.label("Codec");
+            choice(ui, "codec", &mut state.codec, &choices.codecs).labelled_by(l.id);
             ui.end_row();
-            ui.label("Number");
-            ui.add(egui::TextEdit::singleline(&mut state.number).desired_width(130.0).hint_text("local or distant"));
+            let l = ui.label("Number");
+            ui.add(egui::TextEdit::singleline(&mut state.number).desired_width(130.0).hint_text("local or distant"))
+                .labelled_by(l.id);
             ui.end_row();
         });
     });
 
     section(ui, "Connection", |ui| {
         egui::Grid::new("conn").num_columns(2).show(ui, |ui| {
-            ui.label("IP");
-            ui.add(egui::TextEdit::singleline(&mut state.ip).desired_width(130.0).hint_text("local or distant"));
+            let l = ui.label("IP");
+            ui.add(egui::TextEdit::singleline(&mut state.ip).desired_width(130.0).hint_text("local or distant"))
+                .labelled_by(l.id);
             ui.end_row();
-            ui.label("and IP");
-            ui.add(egui::TextEdit::singleline(&mut state.ip_b).desired_width(130.0).hint_text("calls between both"));
+            let l = ui.label("and IP");
+            ui.add(egui::TextEdit::singleline(&mut state.ip_b).desired_width(130.0).hint_text("calls between both"))
+                .labelled_by(l.id);
             ui.end_row();
         });
     });
 
     section(ui, "Period (UTC)", |ui| {
         egui::Grid::new("period").num_columns(2).show(ui, |ui| {
-            ui.label("From");
-            ui.add(egui::TextEdit::singleline(&mut state.from).desired_width(130.0).hint_text("2026-09-01"));
+            let l = ui.label("From");
+            ui.add(egui::TextEdit::singleline(&mut state.from).desired_width(130.0).hint_text("2026-09-01"))
+                .labelled_by(l.id);
             ui.end_row();
-            ui.label("To");
-            ui.add(egui::TextEdit::singleline(&mut state.to).desired_width(130.0).hint_text("2026-09-30"));
+            let l = ui.label("To");
+            ui.add(egui::TextEdit::singleline(&mut state.to).desired_width(130.0).hint_text("2026-09-30"))
+                .labelled_by(l.id);
             ui.end_row();
         });
     });
@@ -220,25 +227,41 @@ pub fn panel(ui: &mut Ui, state: &mut FilterState, choices: &Choices) -> bool {
     section(ui, "Field conditions", |ui| {
         let mut remove = None;
         for (i, c) in state.conditions.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                let field = fields::by_id(c.field).map_or("?", |f| f.name);
-                egui::ComboBox::from_id_salt(("cond_field", i)).width(130.0).selected_text(field).show_ui(ui, |ui| {
-                    for f in fields::FIELDS {
-                        ui.selectable_value(&mut c.field, f.id, f.name);
+            // The number labels the row's widgets for screen readers.
+            let number = ui
+                .horizontal(|ui| {
+                    let n = ui.label(format!("{}.", i + 1));
+                    let field = fields::by_id(c.field).map_or("?", |f| f.name);
+                    egui::ComboBox::from_id_salt(("cond_field", i))
+                        .width(120.0)
+                        .selected_text(field)
+                        .show_ui(ui, |ui| {
+                            for f in fields::FIELDS {
+                                ui.selectable_value(&mut c.field, f.id, f.name);
+                            }
+                        })
+                        .response
+                        .labelled_by(n.id);
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
+                        remove = Some(i);
                     }
-                });
-                if ui.small_button("×").on_hover_text("Remove").clicked() {
-                    remove = Some(i);
-                }
-            });
+                    n.id
+                })
+                .inner;
             ui.horizontal(|ui| {
+                ui.add_space(16.0);
                 let op = OPS.iter().find(|(o, _)| *o == c.op).map_or("?", |(_, s)| s);
-                egui::ComboBox::from_id_salt(("cond_op", i)).width(70.0).selected_text(op).show_ui(ui, |ui| {
-                    for (o, s) in OPS {
-                        ui.selectable_value(&mut c.op, *o, *s);
-                    }
-                });
-                ui.add(egui::TextEdit::singleline(&mut c.value).desired_width(100.0));
+                egui::ComboBox::from_id_salt(("cond_op", i))
+                    .width(70.0)
+                    .selected_text(op)
+                    .show_ui(ui, |ui| {
+                        for (o, s) in OPS {
+                            ui.selectable_value(&mut c.op, *o, *s);
+                        }
+                    })
+                    .response
+                    .labelled_by(number);
+                ui.add(egui::TextEdit::singleline(&mut c.value).desired_width(100.0)).labelled_by(number);
             });
             ui.add_space(4.0);
         }
@@ -268,13 +291,17 @@ fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     egui::CollapsingHeader::new(title).default_open(true).show(ui, add);
 }
 
-fn choice(ui: &mut Ui, id: &str, value: &mut Option<String>, options: &[String]) {
-    egui::ComboBox::from_id_salt(id).width(130.0).selected_text(value.as_deref().unwrap_or("any")).show_ui(ui, |ui| {
-        ui.selectable_value(value, None, "any");
-        for o in options {
-            ui.selectable_value(value, Some(o.clone()), o);
-        }
-    });
+fn choice(ui: &mut Ui, id: &str, value: &mut Option<String>, options: &[String]) -> egui::Response {
+    egui::ComboBox::from_id_salt(id)
+        .width(130.0)
+        .selected_text(value.as_deref().unwrap_or("any"))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, "any");
+            for o in options {
+                ui.selectable_value(value, Some(o.clone()), o);
+            }
+        })
+        .response
 }
 
 /// A condition for "field = value" from a table cell's context menu.
