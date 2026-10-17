@@ -1,13 +1,14 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use ipview::fields::{self, Field, Group};
 use ipview::filter::{self, Condition, Filter};
-use ipview::ticket::{self, Ticket, TicketRecord};
-use ipview::{Value, file};
+use ipview::stats::{MOS_BANDS, Stats, Summary};
+use ipview::ticket::{self, Ticket};
+use ipview::{Value, export, file};
 
 #[derive(Parser)]
 #[command(version, about = "Analyze Alcatel-Lucent OmniPCX Enterprise VoIP tickets (IP*.DAT / .ipv)")]
@@ -125,8 +126,8 @@ fn run() -> Result<()> {
                 None => Box::new(&mut out),
             };
             match format {
-                ExportFormat::Csv => export_csv(sink, &tickets, delimiter)?,
-                ExportFormat::Json => export_json(sink, &tickets)?,
+                ExportFormat::Csv => export::csv(sink, &tickets, delimiter)?,
+                ExportFormat::Json => export::json(sink, &tickets)?,
             }
             if let Some(p) = output {
                 eprintln!("exported {} tickets to {}", tickets.len(), p.display());
@@ -168,7 +169,7 @@ fn load(input: &Input) -> Result<Vec<Ticket>> {
     });
     if let Some(key) = &input.sort {
         let field = lookup(key)?;
-        tickets.sort_by(|a, b| cmp_values(a.value(field.id), b.value(field.id)));
+        tickets.sort_by(|a, b| export::cmp_values(a.value(field.id).as_ref(), b.value(field.id).as_ref()));
     }
     if input.reverse {
         tickets.reverse();
@@ -177,20 +178,6 @@ fn load(input: &Input) -> Result<Vec<Ticket>> {
         tickets.truncate(n);
     }
     Ok(tickets)
-}
-
-/// Orders by value; tickets lacking the field sort last.
-fn cmp_values(a: Option<Value>, b: Option<Value>) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => match (a.as_f64(), b.as_f64()) {
-            (Some(x), Some(y)) => x.total_cmp(&y),
-            _ => a.to_string().cmp(&b.to_string()),
-        },
-    }
 }
 
 fn lookup(key: &str) -> Result<&'static Field> {
@@ -267,83 +254,39 @@ fn print_ticket(out: &mut impl Write, t: &Ticket) -> Result<()> {
     Ok(())
 }
 
-fn export_csv(sink: impl Write, tickets: &[Ticket], delimiter: char) -> Result<()> {
-    if !delimiter.is_ascii() {
-        bail!("CSV delimiter must be an ASCII character");
+fn print_summary(out: &mut impl Write, name: &str, s: Option<Summary>) -> Result<()> {
+    if let Some(s) = s {
+        writeln!(
+            out,
+            "{name:<14} mean {:>7.2}  min {:>7.2}  p5 {:>7.2}  median {:>7.2}  p95 {:>7.2}  max {:>7.2}",
+            s.mean, s.min, s.p5, s.median, s.p95, s.max
+        )?;
     }
-    let mut w = csv::WriterBuilder::new().delimiter(delimiter as u8).from_writer(sink);
-    w.write_record(fields::FIELDS.iter().map(|f| f.key))?;
-    for t in tickets {
-        w.write_record(fields::FIELDS.iter().map(|f| t.value(f.id).map(|v| v.to_string()).unwrap_or_default()))?;
-    }
-    w.flush()?;
-    Ok(())
-}
-
-fn export_json(mut sink: impl Write, tickets: &[Ticket]) -> Result<()> {
-    let records: Vec<TicketRecord> = tickets.iter().map(TicketRecord).collect();
-    serde_json::to_writer_pretty(&mut sink, &records)?;
-    writeln!(sink)?;
-    Ok(())
-}
-
-fn summary(out: &mut impl Write, name: &str, mut v: Vec<f64>) -> Result<()> {
-    if v.is_empty() {
-        return Ok(());
-    }
-    v.sort_by(f64::total_cmp);
-    let mean = v.iter().sum::<f64>() / v.len() as f64;
-    let pct = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
-    writeln!(
-        out,
-        "{name:<14} mean {mean:>7.2}  min {:>7.2}  p5 {:>7.2}  median {:>7.2}  p95 {:>7.2}  max {:>7.2}",
-        v[0],
-        pct(0.05),
-        pct(0.5),
-        pct(0.95),
-        v[v.len() - 1]
-    )?;
     Ok(())
 }
 
 fn print_stats(out: &mut impl Write, tickets: &[Ticket]) -> Result<()> {
-    writeln!(out, "tickets: {}", tickets.len())?;
-    if tickets.is_empty() {
+    let s = Stats::compute(tickets);
+    writeln!(out, "tickets: {}", s.tickets)?;
+    if s.tickets == 0 {
         return Ok(());
     }
-    let times: Vec<i64> = tickets.iter().filter_map(Ticket::end_time).collect();
-    if let (Some(min), Some(max)) = (times.iter().min(), times.iter().max()) {
-        writeln!(out, "period:  {} .. {} UTC", ticket::format_timestamp(*min), ticket::format_timestamp(*max))?;
+    if let Some((min, max)) = s.period {
+        writeln!(out, "period:  {} .. {} UTC", ticket::format_timestamp(min), ticket::format_timestamp(max))?;
     }
-
-    let metrics: Vec<_> = tickets.iter().map(Ticket::metrics).collect();
     writeln!(out)?;
-    summary(out, "MOS", metrics.iter().filter_map(|m| m.mos).collect())?;
-    summary(out, "loss %", metrics.iter().filter_map(|m| m.loss_pct).collect())?;
-    summary(out, "round-trip ms", metrics.iter().filter_map(|m| m.rtd).collect())?;
-    summary(out, "jitter ms", metrics.iter().filter_map(|m| m.jitter_delay).collect())?;
+    print_summary(out, "MOS", s.mos)?;
+    print_summary(out, "loss %", s.loss_pct)?;
+    print_summary(out, "round-trip ms", s.rtd)?;
+    print_summary(out, "jitter ms", s.jitter_delay)?;
 
-    let mos: Vec<f64> = metrics.iter().filter_map(|m| m.mos).collect();
-    if !mos.is_empty() {
+    if let Some(mos) = s.mos {
         writeln!(out, "\nMOS bands:")?;
-        let bands = [
-            (4.3, f64::INFINITY, ">= 4.3"),
-            (4.0, 4.3, "4.0 - 4.3"),
-            (3.6, 4.0, "3.6 - 4.0"),
-            (3.1, 3.6, "3.1 - 3.6"),
-            (f64::NEG_INFINITY, 3.1, "< 3.1"),
-        ];
-        for (lo, hi, label) in bands {
-            let n = mos.iter().filter(|&&m| m >= lo && m < hi).count();
-            writeln!(out, "  {label:<10} {n:>7}  ({:>5.1}%)", 100.0 * n as f64 / mos.len() as f64)?;
+        for ((_, _, label), n) in MOS_BANDS.iter().zip(s.mos_bands) {
+            writeln!(out, "  {label:<10} {n:>7}  ({:>5.1}%)", 100.0 * n as f64 / mos.count as f64)?;
         }
     }
-
-    for (title, id) in [("codecs", 15), ("equipment", 6)] {
-        let mut counts = std::collections::BTreeMap::<String, usize>::new();
-        for t in tickets {
-            *counts.entry(t.value(id).map(|v| v.to_string()).unwrap_or_else(|| "-".into())).or_default() += 1;
-        }
+    for (title, counts) in [("codecs", &s.codecs), ("equipment", &s.equipment)] {
         writeln!(out, "\n{title}:")?;
         for (k, n) in counts {
             writeln!(out, "  {k:<24} {n:>7}")?;

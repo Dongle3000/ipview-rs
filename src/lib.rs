@@ -11,9 +11,11 @@
 
 pub mod compress;
 pub mod emodel;
+pub mod export;
 pub mod fields;
 pub mod file;
 pub mod filter;
+pub mod stats;
 pub mod ticket;
 
 pub use ticket::{Metrics, Ticket, Value};

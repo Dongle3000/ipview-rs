@@ -35,6 +35,25 @@ name, an operator `= != < <= > >= ~ !~` (`~` = contains), and a value. Timestamp
 by prefix (`-w "end_time>=2026-09-01"`), enumerations by name or raw code (`-w codec=8`).
 Quote filters containing `<` or `>` so the shell doesn't treat them as redirections.
 
+## GUI
+
+```sh
+cargo run --release --bin ipview-gui -- ~/ipview     # or start it and use File > Open / drag and drop
+```
+
+Filter panel on the left (MOS, loss, equipment, codec, phone number, IP or IP pair, period,
+plus free field conditions with AND/OR), sortable ticket grid with MOS/loss coloring, and
+all fields of the selected ticket on the right with distributions as bar charts.
+View > Statistics summarizes the visible tickets. Right-click a cell to filter on its value.
+File menu: open/add files or folders, save visible tickets as `.ipv`, export CSV/JSON.
+Keys as in IPView: F3 open, F6 clear filters, F8 clear database; arrow keys move the selection.
+Columns, sort order, filters and the CSV delimiter are remembered between sessions.
+
+The CLI alone builds without GUI dependencies: `cargo build --release --no-default-features --bin ipview`.
+
+Under WSL, if the window fails with `NoGlutinConfigs`, start it via X11:
+`env -u WAYLAND_DISPLAY ipview-gui`.
+
 ## File format
 
 Recovered by reverse-engineering IPView.exe (it is packed with a Yoda's Crypter-style
