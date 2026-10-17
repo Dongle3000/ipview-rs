@@ -317,7 +317,19 @@ impl App {
                     ui.checkbox(&mut self.show_errors, "Load errors");
                 }
                 ui.separator();
-                egui::widgets::global_theme_preference_buttons(ui);
+                // egui's built-in theme buttons use emoji icons the default fonts lack.
+                ui.menu_button("Theme", |ui| {
+                    let mut theme = ui.options(|o| o.theme_preference);
+                    for (choice, label) in [
+                        (egui::ThemePreference::System, "Follow system"),
+                        (egui::ThemePreference::Light, "Light"),
+                        (egui::ThemePreference::Dark, "Dark"),
+                    ] {
+                        if ui.radio_value(&mut theme, choice, label).clicked() {
+                            ui.ctx().set_theme(theme);
+                        }
+                    }
+                });
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("About").clicked() {
@@ -890,6 +902,20 @@ mod tests {
         h.get_by_label("Hide column").click();
         h.run();
         assert!(!h.state().settings.columns.contains(&12));
+    }
+
+    #[test]
+    fn theme_menu_switches_theme() {
+        let mut h = harness();
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label("Theme").click();
+        h.run();
+        snapshot(&mut h, "theme_menu");
+        h.get_by_label("Light").click();
+        h.run();
+        assert_eq!(h.ctx.options(|o| o.theme_preference), egui::ThemePreference::Light);
+        assert_eq!(h.ctx.theme(), egui::Theme::Light);
     }
 
     #[test]
