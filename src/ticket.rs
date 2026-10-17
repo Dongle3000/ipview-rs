@@ -133,6 +133,7 @@ impl Ticket {
                 502 => m.jitter_delay.map(Value::Float),
                 503 => m.mos.map(Value::Float),
                 504 => m.r_wb.map(Value::Float),
+                505 => Some(Value::Bool(m.jitter_corrupt)),
                 _ => None,
             };
         }
@@ -245,7 +246,7 @@ impl fmt::Display for Value {
     }
 }
 
-/// Values derived from the raw counters: IPView's field IDs 500..=503, plus 504.
+/// Values derived from the raw counters: IPView's field IDs 500..=503, plus 504 and 505.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 pub struct Metrics {
     /// RTP packet loss in percent of expected packets.
@@ -258,6 +259,19 @@ pub struct Metrics {
     pub mos: Option<f64>,
     /// R-factor on the extended wideband scale (0..=129, G.107.1), comparable across codecs.
     pub r_wb: Option<f64>,
+    /// The jitter-buffer counters (field 32) are implausible, so jitter delay is not reported
+    /// and MOS uses the RTP packet loss instead of the frame-loss estimate.
+    pub jitter_corrupt: bool,
+}
+
+/// Field 32 counts jitter-buffer frames: at most a few per received packet (4 seen with
+/// 20 ms packets and 5 ms DSP frames). Some NOE tickets carry filler instead
+/// (e.g. 0x2020 = two spaces), exceeding 1000 per packet.
+const MAX_JITTER_FRAMES_PER_PACKET: u64 = 10;
+
+fn jitter_counters_plausible(buckets: &[u32], packets: u64) -> bool {
+    let total: u64 = buckets.iter().map(|&c| c as u64).sum();
+    total <= MAX_JITTER_FRAMES_PER_PACKET * packets.max(1)
 }
 
 /// E-model inputs per codec (field 15).
@@ -314,12 +328,18 @@ impl Metrics {
 
         let framing = t.u8(20).unwrap_or(0) as f64;
         let jitter = t.buckets(32, 4);
-        let jitter_delay = (!jitter.is_empty()).then(|| jitter_delay(&jitter, framing));
+        let jitter_corrupt = !jitter_counters_plausible(&jitter, (rx + lost) as u64);
+        let jitter_delay = (!jitter.is_empty() && !jitter_corrupt).then(|| jitter_delay(&jitter, framing));
 
-        let mut m = Metrics { loss_pct, rtd, jitter_delay, ..Default::default() };
+        let mut m = Metrics { loss_pct, rtd, jitter_delay, jitter_corrupt, ..Default::default() };
         if let Some(codec) = t.u8(15).and_then(codec_params) {
             let ta = rtd.unwrap_or(0.0) / 2.0 + framing + codec.delay_ms + jitter_delay.unwrap_or(0.0);
-            let loss = estimate_loss(t, &codec, framing);
+            let loss = if jitter_corrupt {
+                // No usable frame counts: assume random loss at the RTP packet-loss rate.
+                Loss { ppl: loss_pct.unwrap_or(0.0), burst_r: 1.0 }
+            } else {
+                estimate_loss(t, &codec, framing)
+            };
             let noe = t.is_noe();
             let wb = emodel::WbParams {
                 rlr: if noe { 2.0 } else { 3.0 },
@@ -543,6 +563,40 @@ pub(crate) mod tests {
         // R = 129 - Idle(0.15) - Ie,wb(5); Ta = 20 + 20 ms is below the 100 ms delay threshold.
         assert!((m.r_wb.unwrap() - 123.85).abs() < 0.01);
         assert_eq!(m.mos, Some(emodel::r_to_mos(m.r_wb.unwrap() / 1.29)));
+    }
+
+    #[test]
+    fn corrupt_jitter_counters_fall_back_to_packet_loss() {
+        let mut jitter = vec![0u8; 40];
+        jitter[0..4].copy_from_slice(&0x0048_0000u32.to_be_bytes());
+        for b in 2..7 {
+            jitter[b * 4 + 2..b * 4 + 4].copy_from_slice(&[0x20, 0x20]);
+        }
+        let entries = |lost: u16| {
+            tlv(&[
+                (6, &[1, 2]),
+                (15, &[5]),
+                (20, &[20]),
+                (22, &[0, 0, 1, 238]),
+                (24, &lost.to_be_bytes()),
+                (32, &jitter),
+            ])
+        };
+        let clean = Ticket::from_raw(&entries(0)).metrics();
+        let lossy = Ticket::from_raw(&entries(8)).metrics();
+        assert!(lossy.jitter_corrupt);
+        assert_eq!(lossy.jitter_delay, None);
+        // Ppl = 8 / 502 = 1.59 %: Ie,eff rises by 90 * 1.59 / (1.59 + 7.1).
+        let ppl = 100.0 * 8.0 / 502.0;
+        assert!((clean.r_wb.unwrap() - lossy.r_wb.unwrap() - 90.0 * ppl / (ppl + 7.1)).abs() < 1e-9);
+        assert!(lossy.mos.unwrap() < clean.mos.unwrap());
+    }
+
+    #[test]
+    fn plausible_jitter_counters_are_used() {
+        assert!(jitter_counters_plausible(&[1000, 2, 0], 251));
+        assert!(!jitter_counters_plausible(&[0x48_0000, 0x2020], 494));
+        assert!(jitter_counters_plausible(&[], 0));
     }
 
     #[test]

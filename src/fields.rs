@@ -176,6 +176,7 @@ pub static FIELDS: &[Field] = &[
     unit(f(502, "jitter_delay", "Jitter delay", K::Derived, G::Quality), "ms"),
     f(503, "mos", "MOS", K::Derived, G::Quality),
     f(504, "r_wb", "R-factor (wideband scale)", K::Derived, G::Quality),
+    f(505, "jitter_corrupt", "Jitter counters implausible", K::Derived, G::Quality),
 ];
 
 /// Columns IPView shows by default (from its ipview.ini).

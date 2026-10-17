@@ -90,8 +90,10 @@ For reference, a perfect G.711 call scores about 93 and a perfect G.722 call abo
   20 ms frame-codec framing), not from documentation. Opus gets no MOS: G.113 has no planning
   values for it. The G.722 assumptions (PLC type, G.711-like framing and delay) are unverified.
 * Some NOE tickets carry implausible jitter-buffer counters (field 32, e.g. 0x2020 = two
-  spaces). Jitter delay and the packet-loss estimate behind MOS are unreliable for those,
-  in IPView as well.
+  spaces; healthy tickets have at most ~4 counts per received packet, these over 1000).
+  When the total exceeds 10 per packet, field 505 `jitter_corrupt` is set, jitter delay is
+  left empty, and MOS uses the RTP packet-loss rate (burst ratio 1) instead of IPView's
+  frame-loss estimate, which would make such calls look loss-free.
 * IPView's lost-frame estimate for NOE phones overwrites instead of summing across the
   BFI-over-200ms buckets, so only the last bucket counts. This is reproduced deliberately so
   MOS values match; fix it in `ticket::mos` if you prefer the evident intent.
