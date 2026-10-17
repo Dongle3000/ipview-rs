@@ -1,0 +1,22 @@
+[package]
+name = "ipview-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Analyzer for Alcatel-Lucent OmniPCX Enterprise VoIP tickets (IP*.DAT / .ipv), a rewrite of IPView 2.0.1"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "ipview"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ipview"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+clap = { version = "4.6.7", features = ["derive"] }
+csv = "1.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
