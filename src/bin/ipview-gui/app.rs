@@ -63,6 +63,7 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>, screenshot: Option<crate::Screenshot>) -> App {
+        style::apply(&cc.egui_ctx);
         let settings = if let Some(shot) = &screenshot {
             let mut s = Settings::default();
             s.filters.conditions = shot.conditions.clone();
@@ -362,7 +363,9 @@ impl App {
         // column set and (coarse) available width, so they refit when the window changes.
         let preferred: Vec<f32> = columns.iter().map(|f| preferred_width(f)).collect();
         let spacing = ui.spacing().item_spacing.x * columns.len() as f32;
-        let available = (ui.available_width() - spacing).max(100.0);
+        let scroll_bar = ui.spacing().scroll.allocated_width();
+        // Small margin for the resize handles, so the scroll bar is not pushed out of view.
+        let available = (ui.available_width() - spacing - scroll_bar - 12.0).max(100.0);
         let scale = (available / preferred.iter().sum::<f32>()).min(1.0);
         let width_key = (ui.available_width() / 40.0) as i32;
 
@@ -372,7 +375,9 @@ impl App {
             .resizable(true)
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .min_scrolled_height(0.0);
+            .min_scrolled_height(0.0)
+            // Fill the panel so the scroll bar sits at its right edge at full width.
+            .auto_shrink(false);
         for w in &preferred {
             table = table.column(Column::initial((w * scale).max(36.0)).at_least(30.0).clip(true));
         }

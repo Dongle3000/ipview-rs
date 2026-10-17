@@ -1,6 +1,20 @@
-//! Cell colors for quality values.
+//! Global style tweaks and cell colors for quality values.
 
-use eframe::egui::Color32;
+use eframe::egui::{self, Color32};
+
+/// Always-visible, wider scroll bars instead of egui's thin floating ones that
+/// only appear on hover; long ticket lists need an obvious scroll position.
+pub fn apply(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.spacing.scroll = egui::style::ScrollStyle {
+            bar_width: 10.0,
+            // Thousands of rows would otherwise shrink the handle to a sliver.
+            handle_min_length: 40.0,
+            foreground_color: true,
+            ..egui::style::ScrollStyle::solid()
+        };
+    });
+}
 
 const GOOD: Color32 = Color32::from_rgb(120, 200, 120);
 const FAIR: Color32 = Color32::from_rgb(230, 210, 100);
