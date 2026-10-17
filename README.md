@@ -59,7 +59,7 @@ value   `length` bytes, numbers big-endian; shorter numbers are zero-extended
 | 6 | Equipment | 2 bytes: class, sub-type (1/2 = NOE-IP, 3/n = OXE, ...) |
 | 8, 9 | Local / distant IP | u32 |
 | 10, 11, 39 | Local / distant ID, MCDU | digits: bytes 1-9 are digits, 10 is "0"; zero padded |
-| 15 | Codec | 0 G711A, 1 G711U, 2 G723 6.3, 3 G729A, 4 G723 5.3 |
+| 15 | Codec | 0 G711A, 1 G711U, 2 G723 6.3, 3 G729A, 4 G723 5.3; 5 G722, 8 Opus (inferred) |
 | 18 | Voice mode | 0x50 Idle ... 0x55 Headset |
 | 27 | Round-trip delay distribution | 5 x u16: 0-40, 40-80, 80-150, 150-250, 250+ ms |
 | 30 | Consecutive BFI | 10 x u16 |
@@ -78,9 +78,10 @@ value   `length` bytes, numbers big-endian; shorter numbers are zero-extended
 
 ## Known differences and limitations
 
-* Newer OXE releases emit codec IDs IPView never knew (5 and 8 seen in practice). They are
-  shown as `codec 5` etc. and get no MOS, since there are no E-model parameters for them;
-  IPView would have read past the end of its tables.
+* Newer OXE releases emit codec IDs IPView never knew. 5 and 8 are shown as G722 and Opus:
+  inferred from the data (5 uses the same 5 ms DSP framing as G.711 on NOE phones, 8 uses
+  20 ms frame-codec framing), not from documentation. They get no MOS: the narrowband G.107
+  model has no parameters for wideband codecs (that needs the G.107.1 wideband model).
 * IPView's lost-frame estimate for NOE phones overwrites instead of summing across the
   BFI-over-200ms buckets, so only the last bucket counts. This is reproduced deliberately so
   MOS values match; fix it in `ticket::mos` if you prefer the evident intent.

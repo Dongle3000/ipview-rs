@@ -217,6 +217,10 @@ pub fn codec_name(codec: u8) -> String {
         2 => "G723 6.3kb/s".into(),
         3 => "G729A".into(),
         4 => "G723 5.3kb/s".into(),
+        // Unknown to IPView 2.0.1. Inferred from newer OXE tickets: 5 runs on NOE
+        // phones with G.711-like 5 ms DSP framing, 8 with 20 ms frame-codec framing.
+        5 => "G722".into(),
+        8 => "Opus".into(),
         n => format!("codec {n}"),
     }
 }

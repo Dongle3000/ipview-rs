@@ -179,7 +179,7 @@ mod tests {
         let t = Ticket::from_raw(&tlv(&[(15, &[8])]));
         let m = |s: &str| s.parse::<Condition>().unwrap().matches(&t);
         assert!(m("codec=8"));
-        assert!(m("codec=codec 8"));
+        assert!(m("codec=opus"));
         assert!(!m("codec=0"));
     }
 
