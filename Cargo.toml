@@ -33,3 +33,6 @@ serde_json = "1.0.154"
 [features]
 default = ["gui"]
 gui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:image"]
+
+[profile.release]
+strip = true
