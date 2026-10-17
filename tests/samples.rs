@@ -34,6 +34,9 @@ fn real_files_parse_cleanly() {
             if let Some(mos) = m.mos {
                 assert!((1.0..=4.5).contains(&mos), "{}: MOS {mos}", path.display());
             }
+            if let Some(r) = m.r_wb {
+                assert!(r <= 129.0, "{}: R {r}", path.display());
+            }
             if let Some(loss) = m.loss_pct {
                 assert!((0.0..=100.0).contains(&loss), "{}: loss {loss}", path.display());
             }

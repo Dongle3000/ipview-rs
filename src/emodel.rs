@@ -179,6 +179,85 @@ impl Params {
     }
 }
 
+/// ITU-T G.107.1 (06/2019, Corrigendum 1 01/2020) wideband E-model.
+///
+/// R ranges up to 129 on the extended scale. Noise, loudness and sidetone
+/// effects are not modelled for wideband yet (Ro = 129, Is = 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WbParams {
+    /// Receive loudness rating (dB); only used for talker echo.
+    pub rlr: f64,
+    /// Talker echo loudness rating (dB).
+    pub telr: f64,
+    /// Weighted echo path loss (dB).
+    pub wepl: f64,
+    /// Mean one-way delay of the echo path (ms).
+    pub t: f64,
+    /// Round-trip delay in a 4-wire loop (ms).
+    pub tr: f64,
+    /// Absolute delay in echo-free connections (ms).
+    pub ta: f64,
+    /// Wideband equipment impairment factor Ie,wb (G.113 Appendix IV).
+    pub ie: f64,
+    /// Wideband packet-loss robustness factor Bpl,wb.
+    pub bpl: f64,
+    /// Random packet-loss probability (%).
+    pub ppl: f64,
+    /// Advantage factor.
+    pub a: f64,
+}
+
+/// Maximum rating on the extended R-scale; also the wideband Ro.
+pub const R_MAX_WB: f64 = 129.0;
+
+impl Default for WbParams {
+    /// Defaults from G.107.1 Table 1.
+    fn default() -> Self {
+        WbParams { rlr: 2.0, telr: 65.0, wepl: 110.0, t: 0.0, tr: 0.0, ta: 0.0, ie: 0.0, bpl: 4.3, ppl: 0.0, a: 0.0 }
+    }
+}
+
+impl WbParams {
+    fn idte(&self) -> f64 {
+        // Corrigendum 1 replaces the undefined No,WB with -69.
+        let roe = -1.5 * (-69.0 - self.rlr);
+        let k = if self.t < 100.0 { 0.08 * self.t + 10.0 } else { 18.0 };
+        let terv = self.telr + k - 40.0 * ((1.0 + self.t / 10.0) / (1.0 + self.t / 150.0)).log10()
+            + 6.0 * (-0.3 * self.t * self.t).exp();
+        let re = 80.0 + 3.0 * (terv - 14.0);
+        let d = roe - re;
+        (d / 2.0 + (d * d / 4.0 + 100.0).sqrt() - 1.0) * (1.0 - (-self.t).exp())
+    }
+
+    fn idle(&self) -> f64 {
+        let rle = 10.5 * (self.wepl + 7.0) * (self.tr + 1.0).powf(-0.25);
+        let d = R_MAX_WB - rle;
+        d / 2.0 + (d * d / 4.0 + 169.0).sqrt()
+    }
+
+    fn idd(&self) -> f64 {
+        if self.ta <= 100.0 {
+            return 0.0;
+        }
+        let x = (self.ta / 100.0).log10() / 2f64.log10();
+        25.0 * 1.29 * ((1.0 + x.powi(6)).powf(1.0 / 6.0) - 3.0 * (1.0 + (x / 3.0).powi(6)).powf(1.0 / 6.0) + 2.0)
+    }
+
+    fn ie_eff(&self) -> f64 {
+        self.ie + (95.0 - self.ie) * self.ppl / (self.ppl + self.bpl)
+    }
+
+    /// Transmission rating factor R on the extended 0..=129 scale.
+    pub fn r(&self) -> f64 {
+        R_MAX_WB - (self.idte() + self.idle() + self.idd()) - self.ie_eff() + self.a
+    }
+
+    /// Conversational MOS (MOS-CQEW, Annex A): the narrowband mapping applied to R / 1.29.
+    pub fn mos(&self) -> f64 {
+        r_to_mos(self.r() / 1.29)
+    }
+}
+
 pub fn r_to_mos(r: f64) -> f64 {
     let mos = if r < 0.0 {
         1.0
@@ -205,6 +284,25 @@ mod tests {
         assert_eq!(r_to_mos(-5.0), 1.0);
         assert_eq!(r_to_mos(120.0), 4.5);
         assert!((r_to_mos(93.2) - 4.41).abs() < 0.01);
+    }
+
+    #[test]
+    fn wideband_defaults_are_near_the_top_of_the_scale() {
+        // Only listener echo with WEPL 110 dB remains: Idle ~ 0.15.
+        let r = WbParams::default().r();
+        assert!((r - 128.85).abs() < 0.01, "R = {r}");
+        assert!(WbParams::default().mos() > 4.49);
+    }
+
+    #[test]
+    fn wideband_g722_with_loss_and_delay() {
+        let clean = WbParams { ie: 5.0, bpl: 7.1, ..Default::default() };
+        assert!((clean.r() - 123.85).abs() < 0.01);
+        let lossy = WbParams { ppl: 2.0, ..clean };
+        // Ie,eff = 5 + 90 * 2 / 9.1
+        assert!((clean.r() - lossy.r() - 90.0 * 2.0 / 9.1).abs() < 1e-9);
+        let delayed = WbParams { ta: 200.0, ..clean };
+        assert!(delayed.r() < clean.r());
     }
 
     #[test]

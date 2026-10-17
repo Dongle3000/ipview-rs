@@ -132,6 +132,7 @@ impl Ticket {
                 501 => m.rtd.map(Value::Float),
                 502 => m.jitter_delay.map(Value::Float),
                 503 => m.mos.map(Value::Float),
+                504 => m.r_wb.map(Value::Float),
                 _ => None,
             };
         }
@@ -244,7 +245,7 @@ impl fmt::Display for Value {
     }
 }
 
-/// Values IPView derived from the raw counters (its field IDs 500..=503).
+/// Values derived from the raw counters: IPView's field IDs 500..=503, plus 504.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 pub struct Metrics {
     /// RTP packet loss in percent of expected packets.
@@ -253,16 +254,52 @@ pub struct Metrics {
     pub rtd: Option<f64>,
     /// Mean jitter buffer delay (ms).
     pub jitter_delay: Option<f64>,
-    /// E-model MOS estimate.
+    /// E-model MOS estimate: G.107 for narrowband codecs (as IPView), G.107.1 for wideband ones.
     pub mos: Option<f64>,
+    /// R-factor on the extended wideband scale (0..=129, G.107.1), comparable across codecs.
+    pub r_wb: Option<f64>,
 }
 
-// Per-codec tables, indexed by field 15 (G711A, G711U, G723 6.3, G729A, G723 5.3).
-const FRAME_MS: [f64; 5] = [10.0, 10.0, 30.0, 10.0, 10.0];
-const FRAME_MS_NOE: [f64; 5] = [5.0, 5.0, 30.0, 10.0, 5.0];
-const IE: [f64; 5] = [0.0, 0.0, 15.0, 11.0, 0.0];
-const BPL: [f64; 5] = [25.1, 25.1, 16.1, 19.0, 4.3];
-const CODEC_DELAY_MS: [f64; 5] = [20.0, 20.0, 92.0, 16.0, 20.0];
+/// E-model inputs per codec (field 15).
+struct CodecParams {
+    /// Frame size (ms) used to turn lost packets into lost frames, per phone type.
+    frame_ms: f64,
+    frame_ms_noe: f64,
+    /// Codec delay (ms) added to the one-way delay.
+    delay_ms: f64,
+    /// Narrowband Ie and Bpl (G.113 Appendix I); `None` for wideband codecs.
+    nb: Option<(f64, f64)>,
+    /// Wideband Ie,wb and Bpl,wb (G.113 Appendix IV).
+    wb: (f64, f64),
+}
+
+/// IPView's narrowband tables, entry by entry: (frame, NOE frame, delay, Ie, Bpl).
+const NB_CODECS: [(f64, f64, f64, f64, f64); 5] = [
+    (10.0, 5.0, 20.0, 0.0, 25.1),   // G711A
+    (10.0, 5.0, 20.0, 0.0, 25.1),   // G711U
+    (30.0, 30.0, 92.0, 15.0, 16.1), // G723 6.3
+    (10.0, 10.0, 16.0, 11.0, 19.0), // G729A
+    (10.0, 5.0, 20.0, 0.0, 4.3),    // G723 5.3 (sic, as in IPView)
+];
+
+/// G.113 Appendix IV: narrowband codecs map onto the wideband scale with Ie,wb = Ie + (129 - 93.2).
+const NB_TO_WB_IE: f64 = 35.8;
+
+fn codec_params(codec: u8) -> Option<CodecParams> {
+    match codec {
+        0..=4 => {
+            let (frame_ms, frame_ms_noe, delay_ms, ie, bpl) = NB_CODECS[codec as usize];
+            // G.113 gives no Bpl,wb for narrowband codecs; their narrowband Bpl is used.
+            Some(CodecParams { frame_ms, frame_ms_noe, delay_ms, nb: Some((ie, bpl)), wb: (ie + NB_TO_WB_IE, bpl) })
+        }
+        // G.722 64 kbit/s, G.113 Table IV.4 (diotic, high-quality PLC per G.722 Appendix III).
+        // Framing and delay follow G.711, matching the 5 ms DSP framing seen on NOE phones.
+        5 => Some(CodecParams { frame_ms: 10.0, frame_ms_noe: 5.0, delay_ms: 20.0, nb: None, wb: (5.0, 7.1) }),
+        // Opus (8) has no ITU planning values.
+        _ => None,
+    }
+}
+
 /// Weights for buckets 1..=4 of field 61 (BFI over 200 ms) on NOE phones.
 const BFI200_WEIGHTS: [f64; 4] = [30.0, 60.0, 100.0, 200.0];
 
@@ -279,12 +316,27 @@ impl Metrics {
         let jitter = t.buckets(32, 4);
         let jitter_delay = (!jitter.is_empty()).then(|| jitter_delay(&jitter, framing));
 
-        let mos = t
-            .u8(15)
-            .filter(|&c| (c as usize) < IE.len())
-            .map(|codec| mos(t, codec as usize, rtd.unwrap_or(0.0), framing, jitter_delay.unwrap_or(0.0)));
-
-        Metrics { loss_pct, rtd, jitter_delay, mos }
+        let mut m = Metrics { loss_pct, rtd, jitter_delay, ..Default::default() };
+        if let Some(codec) = t.u8(15).and_then(codec_params) {
+            let ta = rtd.unwrap_or(0.0) / 2.0 + framing + codec.delay_ms + jitter_delay.unwrap_or(0.0);
+            let loss = estimate_loss(t, &codec, framing);
+            let noe = t.is_noe();
+            let wb = emodel::WbParams {
+                rlr: if noe { 2.0 } else { 3.0 },
+                telr: if noe { 66.0 } else { 55.0 },
+                ta,
+                ie: codec.wb.0,
+                bpl: codec.wb.1,
+                ppl: loss.ppl,
+                ..Default::default()
+            };
+            m.r_wb = Some(wb.r());
+            m.mos = Some(match codec.nb {
+                Some((ie, bpl)) => nb_mos(noe, ie, bpl, ta, loss),
+                None => wb.mos(),
+            });
+        }
+        m
     }
 }
 
@@ -306,27 +358,22 @@ fn jitter_delay(buckets: &[u32], framing: f64) -> f64 {
     if weighted != 0.0 { weighted / n } else { 0.0 }
 }
 
-fn mos(t: &Ticket, codec: usize, rtd: f64, framing: f64, jitter_delay: f64) -> f64 {
+#[derive(Debug, Clone, Copy)]
+struct Loss {
+    /// Packet-loss probability (%).
+    ppl: f64,
+    burst_r: f64,
+}
+
+/// IPView's estimate of frame loss from the BFI counters and lost packets.
+fn estimate_loss(t: &Ticket, codec: &CodecParams, framing: f64) -> Loss {
     let noe = t.is_noe();
     let lost = t.u16(24).unwrap_or(0) as f64;
-    let mut p = emodel::Params {
-        stmr: if noe { 22.0 } else { 15.0 },
-        lstr: 14.5,
-        rlr: if noe { 2.0 } else { 3.0 },
-        slr: if noe { 8.0 } else { 7.0 },
-        telr: if noe { 66.0 } else { 55.0 },
-        ie: IE[codec],
-        bpl: BPL[codec],
-        ta: rtd / 2.0 + framing + CODEC_DELAY_MS[codec] + jitter_delay,
-        ..Default::default()
-    };
-
-    // Estimate the number of lost frames.
     let bfi_cons = t.buckets(30, 2);
     let bfi200 = t.buckets(61, 2);
     let bucket = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0) as f64;
     let lost_frames = if noe {
-        let frame = FRAME_MS_NOE[codec];
+        let frame = codec.frame_ms_noe;
         // IPView overwrites the estimate on every iteration instead of summing,
         // so only the last bucket counts. Kept for identical results.
         let mut x = 0.0;
@@ -336,25 +383,40 @@ fn mos(t: &Ticket, codec: usize, rtd: f64, framing: f64, jitter_delay: f64) -> f
         x.max(lost * framing / frame).round_ties_even()
     } else {
         let x: f64 = (0..9).map(|i| (i + 1) as f64 * bucket(&bfi_cons, i)).sum();
-        x.max(lost * framing / FRAME_MS[codec]).round_ties_even()
+        x.max(lost * framing / codec.frame_ms).round_ties_even()
     };
 
     let total_frames: f64 = t.buckets(32, 4).iter().take(10).map(|&c| c as f64).sum();
-    if total_frames != 0.0 {
-        p.ppl = lost_frames / total_frames * 100.0;
-    }
+    let ppl = if total_frames != 0.0 { lost_frames / total_frames * 100.0 } else { 0.0 };
 
-    p.burst_r = if p.ppl == 0.0 {
+    let burst_r = if ppl == 0.0 {
         1.0
     } else {
         let events: f64 =
             if noe { (1..=4).map(|i| bucket(&bfi200, i)).sum() } else { (0..10).map(|i| bucket(&bfi_cons, i)).sum() };
-        let loss = p.ppl / 100.0;
-        let br = if events != 0.0 && loss != 1.0 { lost_frames / events * (1.0 - loss) } else { 0.0 };
+        let p = ppl / 100.0;
+        let br = if events != 0.0 && p != 1.0 { lost_frames / events * (1.0 - p) } else { 0.0 };
         br.clamp(1.0, 10.0)
     };
+    Loss { ppl, burst_r }
+}
 
-    p.mos()
+/// Narrowband G.107 MOS with IPView's phone-dependent parameters.
+fn nb_mos(noe: bool, ie: f64, bpl: f64, ta: f64, loss: Loss) -> f64 {
+    emodel::Params {
+        stmr: if noe { 22.0 } else { 15.0 },
+        lstr: 14.5,
+        rlr: if noe { 2.0 } else { 3.0 },
+        slr: if noe { 8.0 } else { 7.0 },
+        telr: if noe { 66.0 } else { 55.0 },
+        ie,
+        bpl,
+        ta,
+        ppl: loss.ppl,
+        burst_r: loss.burst_r,
+        ..Default::default()
+    }
+    .mos()
 }
 
 /// Serializes a ticket as a flat map of field key to decoded value.
@@ -469,7 +531,24 @@ pub(crate) mod tests {
 
     #[test]
     fn unknown_codec_has_no_mos() {
-        let t = Ticket::from_raw(&tlv(&[(15, &[9])]));
+        let t = Ticket::from_raw(&tlv(&[(15, &[8])]));
         assert_eq!(t.metrics().mos, None);
+        assert_eq!(t.metrics().r_wb, None);
+    }
+
+    #[test]
+    fn g722_uses_the_wideband_model() {
+        let t = Ticket::from_raw(&tlv(&[(6, &[1, 2]), (15, &[5]), (20, &[20])]));
+        let m = t.metrics();
+        // R = 129 - Idle(0.15) - Ie,wb(5); Ta = 20 + 20 ms is below the 100 ms delay threshold.
+        assert!((m.r_wb.unwrap() - 123.85).abs() < 0.01);
+        assert_eq!(m.mos, Some(emodel::r_to_mos(m.r_wb.unwrap() / 1.29)));
+    }
+
+    #[test]
+    fn narrowband_codecs_on_wideband_scale() {
+        let t = Ticket::from_raw(&tlv(&[(15, &[0]), (20, &[20])]));
+        // G.711: Ie,wb = 0 + 35.8, so R = 129 - 0.15 - 35.8.
+        assert!((t.metrics().r_wb.unwrap() - 93.05).abs() < 0.01);
     }
 }

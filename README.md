@@ -76,12 +76,22 @@ value   `length` bytes, numbers big-endian; shorter numbers are zero-extended
 * MOS = ITU-T G.107 E-model with per-codec Ie/Bpl and delay, phone-type-dependent loudness
   ratings, and a packet-loss estimate from BFI counters (see `src/ticket.rs`)
 
+**Wideband (not in IPView).** G.722 calls are scored with the wideband E-model, ITU-T G.107.1
+(06/2019 with Corrigendum 1), using Ie,wb = 5 and Bpl,wb = 7.1 from G.113 (09/2024) Table IV.4
+(diotic listening, high-quality PLC). Their `mos` is MOS-CQEW (R/1.29 on the narrowband curve).
+Field 504 `r_wb` gives every call's R on the extended 0-129 scale so codecs can be compared:
+narrowband codecs use Ie,wb = Ie + 35.8 (G.113 Appendix IV) with their narrowband Bpl.
+For reference, a perfect G.711 call scores about 93 and a perfect G.722 call about 124.
+
 ## Known differences and limitations
 
 * Newer OXE releases emit codec IDs IPView never knew. 5 and 8 are shown as G722 and Opus:
   inferred from the data (5 uses the same 5 ms DSP framing as G.711 on NOE phones, 8 uses
-  20 ms frame-codec framing), not from documentation. They get no MOS: the narrowband G.107
-  model has no parameters for wideband codecs (that needs the G.107.1 wideband model).
+  20 ms frame-codec framing), not from documentation. Opus gets no MOS: G.113 has no planning
+  values for it. The G.722 assumptions (PLC type, G.711-like framing and delay) are unverified.
+* Some NOE tickets carry implausible jitter-buffer counters (field 32, e.g. 0x2020 = two
+  spaces). Jitter delay and the packet-loss estimate behind MOS are unreliable for those,
+  in IPView as well.
 * IPView's lost-frame estimate for NOE phones overwrites instead of summing across the
   BFI-over-200ms buckets, so only the last bucket counts. This is reproduced deliberately so
   MOS values match; fix it in `ticket::mos` if you prefer the evident intent.
