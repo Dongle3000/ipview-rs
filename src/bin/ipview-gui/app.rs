@@ -11,7 +11,9 @@ use ipview::stats::{MOS_BANDS, Stats, Summary};
 use ipview::ticket::{self, Ticket, Value};
 
 use crate::columns::{self, HeaderAction, HeaderFilterDraft, HeaderMenu};
+use crate::download::{DownloadDialog, DownloadSettings};
 use crate::filters::{self, Choices, FilterState};
+use crate::i18n::{self, LanguagePref, t, tf};
 use crate::loader::Loader;
 use crate::{detail, style};
 
@@ -27,6 +29,8 @@ pub struct Settings {
     pub last_dir: Option<PathBuf>,
     pub show_detail: bool,
     pub csv_delimiter: char,
+    pub language: LanguagePref,
+    pub download: DownloadSettings,
 }
 
 impl Default for Settings {
@@ -38,6 +42,8 @@ impl Default for Settings {
             last_dir: None,
             show_detail: true,
             csv_delimiter: ';',
+            language: LanguagePref::System,
+            download: DownloadSettings::default(),
         }
     }
 }
@@ -50,7 +56,8 @@ pub struct App {
     selected: Option<usize>,
     choices: Choices,
     loader: Option<Loader>,
-    status: String,
+    /// Status bar text; `None` shows the (translated) welcome hint.
+    status: Option<String>,
     errors: Vec<String>,
     show_errors: bool,
     show_stats: bool,
@@ -60,6 +67,9 @@ pub struct App {
     /// Scroll the table to the selection on the next frame.
     scroll_to_selected: bool,
     header_draft: HeaderFilterDraft,
+    download: DownloadDialog,
+    /// Shown before the next "Loaded … files" message (e.g. the download summary).
+    status_note: Option<String>,
     screenshot: Option<crate::Screenshot>,
 }
 
@@ -74,6 +84,7 @@ impl App {
         } else {
             cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY)).unwrap_or_default()
         };
+        i18n::apply(settings.language);
         let mut app = App {
             settings,
             tickets: Vec::new(),
@@ -81,7 +92,7 @@ impl App {
             selected: None,
             choices: Choices::default(),
             loader: None,
-            status: "Open ticket files (IP*.DAT, *.ipv) with File > Open, F3, or drag and drop.".into(),
+            status: None,
             errors: Vec::new(),
             show_errors: false,
             show_stats: false,
@@ -90,6 +101,8 @@ impl App {
             stats: None,
             scroll_to_selected: false,
             header_draft: HeaderFilterDraft::default(),
+            download: DownloadDialog::default(),
+            status_note: None,
             screenshot,
         };
         if !paths.is_empty() {
@@ -118,12 +131,20 @@ impl App {
         }
         self.errors = loaded.errors;
         self.show_errors = !self.errors.is_empty();
-        self.status = format!(
-            "{}Loaded {} files{}.",
-            if loaded.cancelled { "Cancelled. " } else { "" },
-            loaded.files,
-            if self.errors.is_empty() { String::new() } else { format!(", {} could not be read", self.errors.len()) }
-        );
+        let status = if loaded.cancelled {
+            tf("Cancelled. Loaded {files} files.", &[("files", &loaded.files)])
+        } else if self.errors.is_empty() {
+            tf("Loaded {files} files.", &[("files", &loaded.files)])
+        } else {
+            tf(
+                "Loaded {files} files, {errors} could not be read.",
+                &[("files", &loaded.files), ("errors", &self.errors.len())],
+            )
+        };
+        self.status = Some(match self.status_note.take() {
+            Some(note) => format!("{note} {status}"),
+            None => status,
+        });
         self.choices = Choices::from_tickets(&self.tickets);
         self.refresh();
     }
@@ -167,8 +188,8 @@ impl App {
     fn open_files(&mut self, replace: bool, ctx: &egui::Context) {
         if let Some(paths) = self
             .dialog()
-            .add_filter("Ticket files", &["DAT", "dat", "ipv", "IPV"])
-            .add_filter("All files", &["*"])
+            .add_filter(t("Ticket files"), &["DAT", "dat", "ipv", "IPV"])
+            .add_filter(t("All files"), &["*"])
             .pick_files()
         {
             self.load(paths, replace, ctx);
@@ -182,15 +203,15 @@ impl App {
     }
 
     fn save_ipv(&mut self) {
-        let Some(path) = self.dialog().add_filter("IPView file", &["ipv"]).set_file_name("tickets.ipv").save_file()
+        let Some(path) = self.dialog().add_filter(t("IPView file"), &["ipv"]).set_file_name("tickets.ipv").save_file()
         else {
             return;
         };
         let tickets: Vec<&Ticket> = self.visible_tickets().collect();
-        self.status = match ipview::file::write_ipv(&path, tickets) {
-            Ok(n) => format!("Saved {n} tickets to {}.", path.display()),
-            Err(e) => format!("Saving failed: {e:#}"),
-        };
+        self.status = Some(match ipview::file::write_ipv(&path, tickets) {
+            Ok(n) => tf("Saved {n} tickets to {path}.", &[("n", &n), ("path", &path.display())]),
+            Err(e) => tf("Saving failed: {error}", &[("error", &format!("{e:#}"))]),
+        });
     }
 
     fn export(&mut self, json: bool) {
@@ -207,10 +228,10 @@ impl App {
                 export::csv(w, self.visible_tickets(), self.settings.csv_delimiter)
             }
         });
-        self.status = match result {
-            Ok(()) => format!("Exported {} tickets to {}.", self.visible.len(), path.display()),
-            Err(e) => format!("Export failed: {e:#}"),
-        };
+        self.status = Some(match result {
+            Ok(()) => tf("Exported {n} tickets to {path}.", &[("n", &self.visible.len()), ("path", &path.display())]),
+            Err(e) => tf("Export failed: {error}", &[("error", &format!("{e:#}"))]),
+        });
     }
 
     fn clear_database(&mut self) {
@@ -218,7 +239,7 @@ impl App {
         self.choices = Choices::default();
         self.selected = None;
         self.refresh();
-        self.status = "Database cleared.".into();
+        self.status = Some(t("Database cleared.").into());
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
@@ -265,74 +286,97 @@ impl App {
         let ctx = ui.ctx().clone();
         egui::MenuBar::new().ui(ui, |ui| {
             let idle = self.loader.is_none();
-            ui.menu_button("File", |ui| {
-                if ui.add_enabled(idle, egui::Button::new("Open files…").shortcut_text("F3")).clicked() {
+            ui.menu_button(t("File"), |ui| {
+                if ui.add_enabled(idle, egui::Button::new(t("Open files…")).shortcut_text("F3")).clicked() {
                     self.open_files(true, &ctx);
                 }
-                if ui.add_enabled(idle, egui::Button::new("Open folder…")).clicked() {
+                if ui.add_enabled(idle, egui::Button::new(t("Open folder…"))).clicked() {
                     self.open_folder(true, &ctx);
                 }
-                if ui.add_enabled(idle, egui::Button::new("Add files…")).clicked() {
+                if ui.add_enabled(idle, egui::Button::new(t("Add files…"))).clicked() {
                     self.open_files(false, &ctx);
                 }
-                if ui.add_enabled(idle, egui::Button::new("Add folder…")).clicked() {
+                if ui.add_enabled(idle, egui::Button::new(t("Add folder…"))).clicked() {
                     self.open_folder(false, &ctx);
                 }
                 ui.separator();
+                if ui.add_enabled(idle, egui::Button::new(t("Download from OXE (SFTP)…"))).clicked() {
+                    self.download.open = true;
+                }
+                ui.separator();
                 let any = !self.visible.is_empty();
-                if ui.add_enabled(any, egui::Button::new("Save visible tickets as .ipv…")).clicked() {
+                if ui.add_enabled(any, egui::Button::new(t("Save visible tickets as .ipv…"))).clicked() {
                     self.save_ipv();
                 }
-                if ui.add_enabled(any, egui::Button::new("Export visible tickets to CSV…")).clicked() {
+                if ui.add_enabled(any, egui::Button::new(t("Export visible tickets to CSV…"))).clicked() {
                     self.export(false);
                 }
-                if ui.add_enabled(any, egui::Button::new("Export visible tickets to JSON…")).clicked() {
+                if ui.add_enabled(any, egui::Button::new(t("Export visible tickets to JSON…"))).clicked() {
                     self.export(true);
                 }
-                ui.menu_button("CSV delimiter", |ui| {
-                    for (d, label) in [(';', "Semicolon (Excel, European)"), (',', "Comma"), ('\t', "Tab")] {
+                ui.menu_button(t("CSV delimiter"), |ui| {
+                    for (d, label) in [(';', t("Semicolon (Excel, European)")), (',', t("Comma")), ('\t', t("Tab"))] {
                         ui.radio_value(&mut self.settings.csv_delimiter, d, label);
                     }
                 });
                 ui.separator();
                 if ui
-                    .add_enabled(!self.tickets.is_empty(), egui::Button::new("Clear database").shortcut_text("F8"))
+                    .add_enabled(!self.tickets.is_empty(), egui::Button::new(t("Clear database")).shortcut_text("F8"))
                     .clicked()
                 {
                     self.clear_database();
                 }
-                if ui.button("Quit").clicked() {
+                if ui.button(t("Quit")).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("View", |ui| {
-                if ui.button("Columns…").clicked() {
+            ui.menu_button(t("View"), |ui| {
+                if ui.button(t("Columns…")).clicked() {
                     self.show_columns = true;
                 }
-                if ui.checkbox(&mut self.show_stats, "Statistics").changed() {
+                if ui.checkbox(&mut self.show_stats, t("Statistics")).changed() {
                     self.refresh();
                 }
-                ui.checkbox(&mut self.settings.show_detail, "Ticket details");
+                ui.checkbox(&mut self.settings.show_detail, t("Ticket details"));
                 if !self.errors.is_empty() {
-                    ui.checkbox(&mut self.show_errors, "Load errors");
+                    ui.checkbox(&mut self.show_errors, t("Load errors"));
                 }
                 ui.separator();
                 // egui's built-in theme buttons use emoji icons the default fonts lack.
-                ui.menu_button("Theme", |ui| {
+                ui.menu_button(t("Theme"), |ui| {
                     let mut theme = ui.options(|o| o.theme_preference);
                     for (choice, label) in [
-                        (egui::ThemePreference::System, "Follow system"),
-                        (egui::ThemePreference::Light, "Light"),
-                        (egui::ThemePreference::Dark, "Dark"),
+                        (egui::ThemePreference::System, t("Follow system")),
+                        (egui::ThemePreference::Light, t("Light")),
+                        (egui::ThemePreference::Dark, t("Dark")),
                     ] {
                         if ui.radio_value(&mut theme, choice, label).clicked() {
                             ui.ctx().set_theme(theme);
                         }
                     }
                 });
+                ui.menu_button(t("Language"), |ui| {
+                    // Language names are shown in their own language.
+                    let system = match i18n::system_language() {
+                        i18n::Lang::De => "Deutsch",
+                        i18n::Lang::En => "English",
+                    };
+                    let mut pref = self.settings.language;
+                    let changed = [
+                        ui.radio_value(&mut pref, LanguagePref::System, format!("{} ({system})", t("Follow system"))),
+                        ui.radio_value(&mut pref, LanguagePref::English, "English"),
+                        ui.radio_value(&mut pref, LanguagePref::German, "Deutsch"),
+                    ]
+                    .iter()
+                    .any(|r| r.clicked());
+                    if changed {
+                        self.settings.language = pref;
+                        i18n::apply(pref);
+                    }
+                });
             });
-            ui.menu_button("Help", |ui| {
-                if ui.button("About").clicked() {
+            ui.menu_button(t("Help"), |ui| {
+                if ui.button(t("About")).clicked() {
                     self.show_about = true;
                 }
             });
@@ -347,16 +391,23 @@ impl App {
                 ui.add(
                     egui::ProgressBar::new(frac)
                         .desired_width(220.0)
-                        .text(format!("Loading {done} / {} files", loader.total)),
+                        .text(tf("Loading {done} / {total} files", &[("done", &done), ("total", &loader.total)])),
                 );
-                if ui.button("Cancel").clicked() {
+                if ui.button(t("Cancel")).clicked() {
                     loader.cancel();
                 }
             } else {
-                ui.label(&self.status);
+                ui.label(
+                    self.status
+                        .as_deref()
+                        .unwrap_or(t("Open ticket files (IP*.DAT, *.ipv) with File > Open, F3, or drag and drop.")),
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(format!("Tickets in database: {}   Visible: {}", self.tickets.len(), self.visible.len()));
+                ui.label(tf(
+                    "Tickets in database: {total}   Visible: {visible}",
+                    &[("total", &self.tickets.len()), ("visible", &self.visible.len())],
+                ));
             });
         });
     }
@@ -365,7 +416,9 @@ impl App {
         if self.tickets.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    RichText::new("No tickets loaded.\nFile > Open (F3) or drop IP*.DAT files here.").size(16.0).weak(),
+                    RichText::new(t("No tickets loaded.\nFile > Open (F3) or drop IP*.DAT files here."))
+                        .size(16.0)
+                        .weak(),
                 );
             });
             return;
@@ -373,7 +426,7 @@ impl App {
 
         ui.horizontal(|ui| {
             columns::picker_button(ui, &mut self.settings.columns);
-            ui.label(RichText::new("Right-click a column header to sort, filter, move or hide it.").weak().small());
+            ui.label(RichText::new(t("Right-click a column header to sort, filter, move or hide it.")).weak().small());
         });
 
         let columns: Vec<&'static Field> = self.settings.columns.iter().filter_map(|&id| fields::by_id(id)).collect();
@@ -426,9 +479,9 @@ impl App {
                         }
                         let r = ui
                             .add(egui::Label::new(RichText::new(label).strong()).sense(egui::Sense::click()))
-                            .on_hover_text(format!(
-                                "{} (field {}). Click to sort, right-click for options.",
-                                f.name, f.id
+                            .on_hover_text(tf(
+                                "{name} (field {id}). Click to sort, right-click for options.",
+                                &[("name", &i18n::field_name(f)), ("id", &f.id)],
                             ));
                         if r.clicked() {
                             clicked_sort = Some(f.id);
@@ -458,13 +511,13 @@ impl App {
             .body(|body| {
                 body.rows(row_height, self.visible.len(), |mut row| {
                     let index = self.visible[row.index()];
-                    let t = &self.tickets[index];
+                    let ticket = &self.tickets[index];
                     row.set_selected(self.selected == Some(index));
-                    let metrics = t.metrics();
+                    let metrics = ticket.metrics();
                     for f in &columns {
                         row.col(|ui| {
-                            let value = t.value(f.id);
-                            let text = value.as_ref().map(|v| v.to_string()).unwrap_or_default();
+                            let value = ticket.value(f.id);
+                            let text = value.as_ref().map(i18n::value_text).unwrap_or_default();
                             let fill = match f.id {
                                 503 => metrics.mos.map(style::mos_color),
                                 500 => metrics.loss_pct.and_then(style::loss_color),
@@ -480,13 +533,16 @@ impl App {
                             let r = ui.add(egui::Label::new(label).selectable(false));
                             if value.is_some() {
                                 r.context_menu(|ui| {
-                                    ui.label(RichText::new(f.name).strong());
+                                    ui.label(RichText::new(i18n::field_name(f)).strong());
                                     for (op, verb) in [(Op::Eq, "="), (Op::Ne, "≠"), (Op::Lt, "<"), (Op::Gt, ">")] {
-                                        if ui.button(format!("Filter {verb} {text}")).clicked() {
+                                        if ui
+                                            .button(tf("Filter {op} {value}", &[("op", &verb), ("value", &text)]))
+                                            .clicked()
+                                        {
                                             new_condition = Some(filters::condition_for(f, op, text.clone()));
                                         }
                                     }
-                                    if ui.button("Copy value").clicked() {
+                                    if ui.button(t("Copy value")).clicked() {
                                         ui.ctx().copy_text(text.clone());
                                     }
                                 });
@@ -546,39 +602,43 @@ impl App {
 
     fn columns_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_columns;
-        egui::Window::new("Columns").open(&mut open).default_width(320.0).show(ctx, |ui| {
-            ui.label("Shown columns, in order:");
-            let mut action = None;
-            for (i, id) in self.settings.columns.iter().enumerate() {
-                let name = fields::by_id(*id).map_or("?", |f| f.name);
-                ui.horizontal(|ui| {
-                    if ui.small_button("Up").clicked() && i > 0 {
-                        action = Some((i, -1));
-                    }
-                    if ui.small_button("Down").clicked() {
-                        action = Some((i, 1));
-                    }
-                    if ui.add_enabled(self.settings.columns.len() > 1, egui::Button::new("×").small()).clicked() {
-                        action = Some((i, 0));
-                    }
-                    ui.label(name);
-                });
-            }
-            if let Some((i, dir)) = action {
-                let cols = &mut self.settings.columns;
-                match dir {
-                    0 => {
-                        cols.remove(i);
-                    }
-                    -1 => cols.swap(i, i - 1),
-                    _ if i + 1 < cols.len() => cols.swap(i, i + 1),
-                    _ => {}
+        egui::Window::new(t("Columns"))
+            .id(egui::Id::unique("columns_window"))
+            .open(&mut open)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.label(t("Shown columns, in order:"));
+                let mut action = None;
+                for (i, id) in self.settings.columns.iter().enumerate() {
+                    let name = fields::by_id(*id).map_or("?", i18n::field_name);
+                    ui.horizontal(|ui| {
+                        if ui.small_button(t("Up")).clicked() && i > 0 {
+                            action = Some((i, -1));
+                        }
+                        if ui.small_button(t("Down")).clicked() {
+                            action = Some((i, 1));
+                        }
+                        if ui.add_enabled(self.settings.columns.len() > 1, egui::Button::new("×").small()).clicked() {
+                            action = Some((i, 0));
+                        }
+                        ui.label(name);
+                    });
                 }
-            }
-            ui.separator();
-            ui.label("Available columns:");
-            columns::picker(ui, &mut self.settings.columns);
-        });
+                if let Some((i, dir)) = action {
+                    let cols = &mut self.settings.columns;
+                    match dir {
+                        0 => {
+                            cols.remove(i);
+                        }
+                        -1 => cols.swap(i, i - 1),
+                        _ if i + 1 < cols.len() => cols.swap(i, i + 1),
+                        _ => {}
+                    }
+                }
+                ui.separator();
+                ui.label(t("Available columns:"));
+                columns::picker(ui, &mut self.settings.columns);
+            });
         self.show_columns = open;
     }
 
@@ -591,19 +651,23 @@ impl App {
         }
         let mut open = true;
         let stats = self.stats.as_ref().unwrap();
-        egui::Window::new("Statistics (visible tickets)")
+        egui::Window::new(t("Statistics (visible tickets)"))
+            .id(egui::Id::unique("stats_window"))
             .open(&mut open)
             .default_width(460.0)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                ui.label(format!("Tickets: {}", stats.tickets));
+                ui.label(tf("Tickets: {n}", &[("n", &stats.tickets)]));
                 if let Some((a, b)) = stats.period {
-                    ui.label(format!("Period: {} – {} UTC", ticket::format_timestamp(a), ticket::format_timestamp(b)));
+                    ui.label(tf(
+                        "Period: {from} – {to} UTC",
+                        &[("from", &ticket::format_timestamp(a)), ("to", &ticket::format_timestamp(b))],
+                    ));
                 }
                 ui.add_space(6.0);
                 egui::Grid::new("summary").striped(true).num_columns(7).show(ui, |ui| {
-                    for h in ["", "mean", "min", "p5", "median", "p95", "max"] {
+                    for h in ["", t("mean"), t("min"), t("p5"), t("median"), t("p95"), t("max")] {
                         ui.strong(h);
                     }
                     ui.end_row();
@@ -616,15 +680,15 @@ impl App {
                             ui.end_row();
                         }
                     };
-                    row(ui, "MOS", stats.mos);
-                    row(ui, "Loss %", stats.loss_pct);
-                    row(ui, "Round-trip ms", stats.rtd);
-                    row(ui, "Jitter ms", stats.jitter_delay);
+                    row(ui, t("MOS"), stats.mos);
+                    row(ui, t("Loss %"), stats.loss_pct);
+                    row(ui, t("Round-trip ms"), stats.rtd);
+                    row(ui, t("Jitter ms"), stats.jitter_delay);
                 });
 
                 if let Some(mos) = stats.mos {
                     ui.add_space(8.0);
-                    ui.strong("MOS bands");
+                    ui.strong(t("MOS bands"));
                     for ((lo, _, label), n) in MOS_BANDS.iter().zip(stats.mos_bands) {
                         ui.horizontal(|ui| {
                             ui.add_sized([70.0, 14.0], egui::Label::new(*label));
@@ -643,7 +707,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.columns(2, |cols| {
                     for (ui, (title, counts)) in
-                        cols.iter_mut().zip([("Codecs", &stats.codecs), ("Equipment", &stats.equipment)])
+                        cols.iter_mut().zip([(t("Codecs"), &stats.codecs), (t("Equipment"), &stats.equipment)])
                     {
                         ui.strong(title);
                         egui::Grid::new(title).show(ui, |ui| {
@@ -663,21 +727,30 @@ impl App {
     }
 
     fn misc_windows(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Load errors").open(&mut self.show_errors).default_width(500.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                for e in &self.errors {
-                    ui.label(e);
-                }
+        egui::Window::new(t("Load errors"))
+            .id(egui::Id::unique("errors_window"))
+            .open(&mut self.show_errors)
+            .default_width(500.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    for e in &self.errors {
+                        ui.label(e);
+                    }
+                });
             });
-        });
-        egui::Window::new("About").open(&mut self.show_about).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.heading(format!("IPView (Rust) {}", env!("CARGO_PKG_VERSION")));
-            ui.label("Analyzer for Alcatel-Lucent OmniPCX Enterprise VoIP tickets (IP*.DAT, .ipv).");
-            ui.label("A rewrite of IPView 2.0.1 by Sven Fabricius (2007).");
-            ui.add_space(6.0);
-            ui.label("MOS: ITU-T G.107 E-model (narrowband), G.107.1 (wideband, G.722).");
-            ui.label("Times are shown in UTC.");
-        });
+        egui::Window::new(t("About"))
+            .id(egui::Id::unique("about_window"))
+            .open(&mut self.show_about)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading(format!("IPView (Rust) {}", env!("CARGO_PKG_VERSION")));
+                ui.label(t("Analyzer for Alcatel-Lucent OmniPCX Enterprise VoIP tickets (IP*.DAT, .ipv)."));
+                ui.label(t("A rewrite of IPView 2.0.1 by Sven Fabricius (2007)."));
+                ui.add_space(6.0);
+                ui.label(t("MOS: ITU-T G.107 E-model (narrowband), G.107.1 (wideband, G.722)."));
+                ui.label(t("Times are shown in UTC."));
+            });
     }
 }
 
@@ -703,17 +776,17 @@ fn sort_arrow(ui: &mut Ui, descending: bool) {
 /// Column header text: the field name without long prefixes.
 fn short_name(f: &Field) -> &'static str {
     match f.id {
-        1 => "End time",
-        12 => "Dur.",
-        22 => "RTP rx",
-        23 => "RTP tx",
-        24 => "RTP lost",
-        500 => "Loss",
-        501 => "Round-trip",
-        502 => "Jitter",
-        504 => "R (WB)",
-        505 => "Jitter corrupt",
-        _ => f.name,
+        1 => t("End time"),
+        12 => t("Dur."),
+        22 => t("RTP rx"),
+        23 => t("RTP tx"),
+        24 => t("RTP lost"),
+        500 => t("Loss"),
+        501 => t("Round-trip"),
+        502 => t("Jitter"),
+        504 => t("R (WB)"),
+        505 => t("Jitter corrupt"),
+        _ => i18n::field_name(f),
     }
 }
 
@@ -741,7 +814,7 @@ impl eframe::App for App {
                 match self.selected.map(|i| &self.tickets[i]) {
                     Some(t) => detail::show(ui, t),
                     None => {
-                        ui.label(RichText::new("Select a ticket to see all of its fields.").weak());
+                        ui.label(RichText::new(t("Select a ticket to see all of its fields.")).weak());
                     }
                 }
             });
@@ -752,6 +825,10 @@ impl eframe::App for App {
         self.columns_window(&ctx);
         self.stats_window(&ctx);
         self.misc_windows(&ctx);
+        if let Some(done) = self.download.show(&ctx, &mut self.settings.download) {
+            self.status_note = self.download.take_message();
+            self.load(done.paths, done.replace, &ctx);
+        }
 
         if let Some(shot) = &mut self.screenshot
             && self.loader.is_none()
@@ -808,10 +885,20 @@ mod tests {
             .collect()
     }
 
+    static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The UI language is global; tests that depend on it hold this lock.
+    fn language(lang: i18n::Lang) -> std::sync::MutexGuard<'static, ()> {
+        let guard = LANGUAGE.lock().unwrap_or_else(|e| e.into_inner());
+        i18n::set(lang);
+        guard
+    }
+
     fn harness() -> Harness<'static, App> {
         let mut h = Harness::builder().with_size([1300.0, 800.0]).build_eframe(|cc| {
             let mut app = App::new(cc, Vec::new(), None);
-            app.settings = Settings::default();
+            app.settings = Settings { language: LanguagePref::English, ..Settings::default() };
+            i18n::apply(app.settings.language);
             app.tickets = tickets();
             app.choices = Choices::from_tickets(&app.tickets);
             app.refresh();
@@ -836,6 +923,7 @@ mod tests {
 
     #[test]
     fn header_menu_sorts() {
+        let _lang = language(i18n::Lang::En);
         let mut h = harness();
         assert_eq!(durations(&h), [5, 30, 10]);
 
@@ -862,6 +950,7 @@ mod tests {
 
     #[test]
     fn header_menu_filters_by_typing() {
+        let _lang = language(i18n::Lang::En);
         let mut h = harness();
         h.get_by_label("Dur. [s]").click_secondary();
         h.run();
@@ -887,6 +976,7 @@ mod tests {
 
     #[test]
     fn header_menu_moves_and_hides_columns() {
+        let _lang = language(i18n::Lang::En);
         let mut h = harness();
         let pos = |h: &Harness<'_, App>| h.state().settings.columns.iter().position(|&c| c == 12).unwrap();
         let start = pos(&h);
@@ -906,6 +996,7 @@ mod tests {
 
     #[test]
     fn theme_menu_switches_theme() {
+        let _lang = language(i18n::Lang::En);
         let mut h = harness();
         h.get_by_label("View").click();
         h.run();
@@ -919,7 +1010,125 @@ mod tests {
     }
 
     #[test]
+    fn german_interface() {
+        let _lang = language(i18n::Lang::De);
+        let mut h = Harness::builder().with_size([1300.0, 800.0]).build_eframe(|cc| {
+            let mut app = App::new(cc, Vec::new(), None);
+            app.settings = Settings { language: LanguagePref::German, ..Settings::default() };
+            i18n::apply(app.settings.language);
+            app.tickets = tickets();
+            app.choices = Choices::from_tickets(&app.tickets);
+            app.selected = Some(0);
+            app.refresh();
+            app
+        });
+        h.run();
+        snapshot(&mut h, "german");
+        for label in ["Datei", "Ansicht", "Hilfe", "Filter", "Gesprächsdauer", "Kompressionsart"] {
+            assert!(h.query_by_label(label).is_some(), "missing German label {label:?}");
+        }
+        h.get_by_label("Datei").click();
+        h.run();
+        assert!(h.query_by_label("Von OXE herunterladen (SFTP)…").is_some());
+        snapshot(&mut h, "german_file_menu");
+    }
+
+    /// Full dialog flow against scripts/test_sftp_server.py (needs IPVIEW_SFTP_TEST_PYTHON).
+    #[test]
+    fn download_dialog_fetches_and_loads() {
+        let Ok(python) = std::env::var("IPVIEW_SFTP_TEST_PYTHON") else {
+            eprintln!("IPVIEW_SFTP_TEST_PYTHON not set, skipping");
+            return;
+        };
+        let _lang = language(i18n::Lang::En);
+        let base = std::env::temp_dir().join(format!("ipview-gui-sftp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let account = base.join("usr4/account");
+        std::fs::create_dir_all(&account).unwrap();
+        // Two ticket files from the test data: one recent, one old.
+        let mut raw = Vec::new();
+        for t in tickets() {
+            raw.extend(t.raw());
+        }
+        std::fs::write(account.join("IPNEW.DAT"), &raw).unwrap();
+        std::fs::write(account.join("IPOLD.DAT"), &raw).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(account.join("IPOLD.DAT"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400))
+            .unwrap();
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test_sftp_server.py");
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut server = std::process::Command::new(python)
+            .arg(script)
+            .arg(&base)
+            .arg(base.join("host_key"))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(server.stdout.take().unwrap()), &mut line).unwrap();
+        let port: u16 = line.trim().parse().unwrap();
+        let _server = KillOnDrop(server);
+
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            app.tickets.clear();
+            app.refresh();
+            app.download.known_hosts = base.join("known_hosts");
+            app.download.password = "secret".into();
+            let d = &mut app.settings.download;
+            d.target.host = "127.0.0.1".into();
+            d.target.port = port;
+            d.selection = ipview::remote::Selection::LastDays(2);
+            d.local_dir = Some(base.join("downloads"));
+        }
+        h.run();
+        h.get_by_label("File").click();
+        h.run();
+        h.get_by_label("Download from OXE (SFTP)…").click();
+        h.run();
+        snapshot(&mut h, "download_dialog");
+        h.get_by_label("Download and open").click();
+
+        // The progress bar animates while working, so step frames instead of waiting to settle.
+        let wait_for = |h: &mut Harness<'_, App>, what: &str, done: &dyn Fn(&Harness<'_, App>) -> bool| {
+            for _ in 0..400 {
+                h.run_steps(2);
+                if done(h) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+        wait_for(&mut h, "host key prompt", &|h| h.query_by_label("Trust and continue").is_some());
+        snapshot(&mut h, "download_host_key");
+        h.get_by_label("Trust and continue").click();
+        wait_for(&mut h, "tickets", &|h| !h.state().tickets.is_empty());
+
+        let app = h.state();
+        assert_eq!(app.tickets.len(), 3, "only the recent file (3 tickets) is downloaded and loaded");
+        assert!(base.join("downloads/IPNEW.DAT").exists());
+        assert!(!base.join("downloads/IPOLD.DAT").exists());
+        let status = app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("1 files downloaded"), "{status}");
+        assert_eq!(app.settings.download.recent.first().map(|t| t.port), Some(port));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn column_picker_adds_and_removes() {
+        let _lang = language(i18n::Lang::En);
         let mut h = harness();
         assert!(!h.state().settings.columns.contains(&15));
         h.get_by_label("Columns").click();

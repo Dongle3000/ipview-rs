@@ -13,6 +13,7 @@ cargo build --release        # binary: target/release/ipview
 cargo test                   # unit tests
 IPVIEW_SAMPLES=~/ipview cargo test --release   # also check a directory of real files
 IPVIEW_SNAPSHOT_DIR=/tmp/shots cargo test --bin ipview-gui   # GUI tests, saving rendered images
+IPVIEW_SFTP_TEST_PYTHON=python3 cargo test   # SFTP tests against scripts/test_sftp_server.py (needs asyncssh)
 ```
 
 ## Usage
@@ -29,7 +30,22 @@ ipview export ~/ipview -o tickets.csv                  # all fields; --delimiter
 ipview export ~/ipview -f json -w "equipment=NOE-IP"
 ipview save  ~/ipview -w "loss_pct>1" -o bad.ipv       # IPView-compatible subset
 ipview fields                                          # field IDs and keys
+ipview fetch 10.0.0.10 --last-days 2                   # download IP*.DAT from the OXE via SFTP
 ```
+
+### Downloading from the OXE
+
+`ipview fetch HOST` connects over SSH/SFTP (user `adfexc`, folder `/usr4/account` by default;
+`--user`, `--dir`, `--port` to change), asks for the password (or reads `IPVIEW_SSH_PASSWORD`),
+and downloads the selected `IP*.DAT` files: `--last-files N`, `--last-days N` (default 1) or
+`--last-hours N`, by file modification time. Files go to `Downloads/IPView/<host>` unless `-o`
+is given; files already present with the same size are skipped, so repeated runs only fetch new
+ones. `--list` only shows what would be downloaded.
+
+The server's host key is checked like OpenSSH does: on the first connection its SHA256
+fingerprint is shown for confirmation (or `--accept-host-key`), then stored in `known_hosts`
+under `%APPDATA%\ipview` (Windows) or `~/.config/ipview`. A changed key is refused.
+In the GUI the same is available under File > Download from OXE (SFTP); the password is not saved.
 
 Filters (`-w/--where`, repeatable, AND by default, `--any` for OR) use a field key, ID or
 name, an operator `= != < <= > >= ~ !~` (`~` = contains), and a value. Timestamps compare
@@ -51,7 +67,12 @@ operator, type a value, Enter), remove its filters, move or hide it. The Columns
 table (also in the header menu) picks columns by group; View > Columns also reorders them.
 File menu: open/add files or folders, save visible tickets as `.ipv`, export CSV/JSON.
 Keys as in IPView: F3 open, F6 clear filters, F8 clear database; arrow keys move the selection.
-Columns, sort order, filters and the CSV delimiter are remembered between sessions.
+Columns, sort order, filters, the CSV delimiter and the download settings (not the password) are
+remembered between sessions.
+
+The interface is in English or German. By default it follows the system language (German for
+any `de-*` locale); View > Language switches it. Error details from the network or files may
+still be in English.
 
 The CLI alone builds without GUI dependencies: `cargo build --release --no-default-features --bin ipview`.
 
@@ -121,4 +142,5 @@ For reference, a perfect G.711 call scores about 93 and a perfect G.722 call abo
   BFI-over-200ms buckets, so only the last bucket counts. This is reproduced deliberately so
   MOS values match; fix it in `ticket::mos` if you prefer the evident intent.
 * Field 45 (minimum delay) uses 65535 for "no measurement"; it is shown as-is.
-* Not ported: the GUI and FTP/SFTP download of tickets from the OXE.
+* Not ported: plain FTP download and the original's FTP address book (recent SFTP targets are
+  remembered instead). SFTP has not yet been tried against a real OXE, only against a test server.

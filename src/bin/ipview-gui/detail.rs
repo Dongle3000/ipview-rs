@@ -2,15 +2,16 @@
 
 use eframe::egui::{self, Color32, RichText, Ui};
 
-use ipview::fields::{self, Field, Group};
-use ipview::ticket::{self, Ticket, Value};
+use ipview::fields::{self, Field};
+use ipview::ticket::{Ticket, Value};
 
+use crate::i18n::{self, t, tf};
 use crate::style;
 
-pub fn show(ui: &mut Ui, t: &Ticket) {
-    let title = t.value(1).map(|v| format!("{v} UTC")).unwrap_or_else(|| "(no timestamp)".into());
+pub fn show(ui: &mut Ui, ticket: &Ticket) {
+    let title = ticket.value(1).map(|v| format!("{v} UTC")).unwrap_or_else(|| t("(no timestamp)").into());
     ui.heading(title);
-    let m = t.metrics();
+    let m = ticket.metrics();
     ui.horizontal(|ui| {
         if let Some(mos) = m.mos {
             ui.label(
@@ -20,14 +21,14 @@ pub fn show(ui: &mut Ui, t: &Ticket) {
                     .background_color(style::mos_color(mos)),
             );
         } else {
-            ui.label(RichText::new("no MOS").weak());
+            ui.label(RichText::new(t("no MOS")).weak());
         }
         if let Some(loss) = m.loss_pct {
-            ui.label(format!("loss {loss:.2} %"));
+            ui.label(tf("loss {loss} %", &[("loss", &format!("{loss:.2}"))]));
         }
         if m.jitter_corrupt {
-            ui.label(RichText::new("! jitter counters implausible").color(ui.visuals().warn_fg_color)).on_hover_text(
-                "Field 32 holds filler instead of counts. Jitter delay is not shown and MOS uses the RTP packet loss.",
+            ui.label(RichText::new(t("! jitter counters implausible")).color(ui.visuals().warn_fg_color)).on_hover_text(
+                t("Field 32 holds filler instead of counts. Jitter delay is not shown and MOS uses the RTP packet loss."),
             );
         }
     });
@@ -43,61 +44,49 @@ pub fn show(ui: &mut Ui, t: &Ticket) {
             let members: Vec<&Field> = ordered[i..].iter().take_while(|f| f.group == group).copied().collect();
             i += members.len();
             let present: Vec<(&Field, Value)> =
-                members.into_iter().filter_map(|f| t.value(f.id).map(|v| (f, v))).collect();
+                members.into_iter().filter_map(|f| ticket.value(f.id).map(|v| (f, v))).collect();
             if present.is_empty() {
                 continue;
             }
-            egui::CollapsingHeader::new(group_title(group)).id_salt(("group", group as u8)).default_open(true).show(
-                ui,
-                |ui| {
+            egui::CollapsingHeader::new(i18n::group_title(group))
+                .id_salt(("group", group as u8))
+                .default_open(true)
+                .show(ui, |ui| {
                     egui::Grid::new(("grid", group as u8)).num_columns(2).striped(true).show(ui, |ui| {
                         for (f, v) in &present {
-                            ui.label(f.name).on_hover_text(format!("field {} · {}", f.id, f.key));
+                            ui.label(i18n::field_name(f))
+                                .on_hover_text(tf("field {id} · {key}", &[("id", &f.id), ("key", &f.key)]));
                             match v {
                                 Value::Buckets(counts) => buckets(ui, f, counts),
-                                _ => {
-                                    ui.label(ticket::display(t, f));
+                                v => {
+                                    ui.label(match f.unit {
+                                        Some(u) => format!("{} {u}", i18n::value_text(v)),
+                                        None => i18n::value_text(v),
+                                    });
                                 }
                             }
                             ui.end_row();
                         }
                     });
+                });
+        }
+
+        let unknown: Vec<String> = ticket
+            .field_ids()
+            .filter(|&id| fields::by_id(id).is_none())
+            .map(|id| format!("{id} = {}", Value::Raw(ticket.raw_field(id).unwrap_or_default().to_vec())))
+            .collect();
+        if !unknown.is_empty() {
+            egui::CollapsingHeader::new(t("Unknown fields")).id_salt("unknown_fields").default_open(false).show(
+                ui,
+                |ui| {
+                    for u in unknown {
+                        ui.monospace(u);
+                    }
                 },
             );
         }
-
-        let unknown: Vec<String> = t
-            .field_ids()
-            .filter(|&id| fields::by_id(id).is_none())
-            .map(|id| format!("{id} = {}", Value::Raw(t.raw_field(id).unwrap_or_default().to_vec())))
-            .collect();
-        if !unknown.is_empty() {
-            egui::CollapsingHeader::new("Unknown fields").default_open(false).show(ui, |ui| {
-                for u in unknown {
-                    ui.monospace(u);
-                }
-            });
-        }
     });
-}
-
-pub fn group_title(g: Group) -> &'static str {
-    match g {
-        Group::Ticket => "Ticket",
-        Group::Quality => "Quality",
-        Group::Call => "Call",
-        Group::Connection => "Connection",
-        Group::Voice => "Voice",
-        Group::Rtp => "RTP",
-        Group::Delay => "Delay",
-        Group::Jitter => "Jitter",
-        Group::Bfi => "Bad frames (BFI)",
-        Group::Fax => "FAX",
-        Group::Transparency => "Transparency",
-        Group::QoS => "QoS",
-        Group::Dsp => "DSP",
-        Group::Misc => "Miscellaneous",
-    }
 }
 
 /// Small horizontal bar chart of a distribution, one bar per bucket.
@@ -106,7 +95,7 @@ fn buckets(ui: &mut Ui, f: &Field, counts: &[u32]) {
     let total: u64 = counts.iter().map(|&c| c as u64).sum();
     ui.vertical(|ui| {
         if total == 0 {
-            ui.label(RichText::new("all zero").weak());
+            ui.label(RichText::new(t("all zero")).weak());
             return;
         }
         let bar_color = ui.visuals().selection.bg_fill;

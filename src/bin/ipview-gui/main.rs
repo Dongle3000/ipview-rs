@@ -13,7 +13,9 @@
 mod app;
 mod columns;
 mod detail;
+mod download;
 mod filters;
+mod i18n;
 mod loader;
 mod style;
 

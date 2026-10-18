@@ -27,12 +27,16 @@ eframe = { version = "0.37.0", default-features = false, features = ["default_fo
 egui_extras = { version = "0.37.0", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 rfd = { version = "0.17.2", optional = true }
+rpassword = { version = "7.5.4", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+ssh2 = { version = "0.9.6", optional = true }
+sys-locale = { version = "0.3.2", optional = true }
 
 [features]
-default = ["gui"]
-gui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:image"]
+default = ["gui", "sftp"]
+gui = ["sftp", "dep:eframe", "dep:egui_extras", "dep:rfd", "dep:image", "dep:sys-locale"]
+sftp = ["dep:ssh2", "dep:rpassword"]
 
 [profile.release]
 strip = true

@@ -15,6 +15,8 @@ pub mod export;
 pub mod fields;
 pub mod file;
 pub mod filter;
+#[cfg(feature = "sftp")]
+pub mod remote;
 pub mod stats;
 pub mod ticket;
 

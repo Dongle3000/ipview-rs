@@ -1,3 +1,6 @@
+#[cfg(feature = "sftp")]
+mod fetch;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -59,6 +62,9 @@ enum Command {
     },
     /// List known ticket fields.
     Fields,
+    /// Download IP*.DAT files from the OXE over SFTP.
+    #[cfg(feature = "sftp")]
+    Fetch(fetch::FetchArgs),
 }
 
 #[derive(Args)]
@@ -138,6 +144,8 @@ fn run() -> Result<()> {
             eprintln!("saved {n} tickets to {}", output.display());
         }
         Command::Stats { input } => print_stats(&mut out, &load(&input)?)?,
+        #[cfg(feature = "sftp")]
+        Command::Fetch(args) => fetch::run(args)?,
         Command::Fields => {
             for f in fields::FIELDS {
                 writeln!(out, "{:>4}  {:<24} {:<32} {:?}", f.id, f.key, f.name, f.group)?;

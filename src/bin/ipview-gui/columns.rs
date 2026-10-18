@@ -6,6 +6,7 @@ use ipview::fields::{self, Field, Group};
 use ipview::filter::Op;
 
 use crate::filters::DynCondition;
+use crate::i18n::{self, t, tf};
 
 const FILTER_OPS: &[(Op, &str)] = &[
     (Op::Eq, "="),
@@ -60,17 +61,17 @@ impl HeaderMenu<'_> {
         let f = self.field;
         let mut action = None;
         ui.set_min_width(230.0);
-        ui.label(RichText::new(f.name).strong());
+        ui.label(RichText::new(i18n::field_name(f)).strong());
         ui.separator();
 
         let current = self.sort.filter(|(id, _)| *id == f.id).map(|(_, d)| d);
-        if ui.add_enabled(current != Some(false), egui::Button::new("Sort ascending")).clicked() {
+        if ui.add_enabled(current != Some(false), egui::Button::new(t("Sort ascending"))).clicked() {
             action = Some(HeaderAction::Sort { field: f.id, descending: false });
         }
-        if ui.add_enabled(current != Some(true), egui::Button::new("Sort descending")).clicked() {
+        if ui.add_enabled(current != Some(true), egui::Button::new(t("Sort descending"))).clicked() {
             action = Some(HeaderAction::Sort { field: f.id, descending: true });
         }
-        if ui.add_enabled(self.sort.is_some(), egui::Button::new("Clear sorting")).clicked() {
+        if ui.add_enabled(self.sort.is_some(), egui::Button::new(t("Clear sorting"))).clicked() {
             action = Some(HeaderAction::ClearSort);
         }
         ui.separator();
@@ -83,11 +84,11 @@ impl HeaderMenu<'_> {
         }
         draft.shown_this_frame = true;
         let op = *draft.op.get_or_insert(default_op(f));
-        let filter_label = ui.label("Filter");
+        let filter_label = ui.label(t("Filter"));
         let mut refocus = false;
         ui.horizontal_wrapped(|ui| {
             for (o, label) in FILTER_OPS {
-                if ui.selectable_label(op == *o, *label).clicked() {
+                if ui.selectable_label(op == *o, t(label)).clicked() {
                     draft.op = Some(*o);
                     refocus = true;
                 }
@@ -103,7 +104,7 @@ impl HeaderMenu<'_> {
                 edit.request_focus();
             }
             submit |= edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            submit |= ui.add_enabled(!draft.value.trim().is_empty(), egui::Button::new("Add filter")).clicked();
+            submit |= ui.add_enabled(!draft.value.trim().is_empty(), egui::Button::new(t("Add filter"))).clicked();
         });
         if submit && !draft.value.trim().is_empty() {
             action = Some(HeaderAction::AddFilter(DynCondition {
@@ -114,7 +115,7 @@ impl HeaderMenu<'_> {
             draft.value.clear();
         }
         if self.filters_on_field > 0 {
-            let label = format!("Remove filters on this column ({})", self.filters_on_field);
+            let label = tf("Remove filters on this column ({n})", &[("n", &self.filters_on_field)]);
             if ui.button(label).clicked() {
                 action = Some(HeaderAction::RemoveFilters(f.id));
             }
@@ -122,14 +123,14 @@ impl HeaderMenu<'_> {
         ui.separator();
 
         ui.horizontal(|ui| {
-            if ui.add_enabled(self.position > 0, egui::Button::new("Move left")).clicked() {
+            if ui.add_enabled(self.position > 0, egui::Button::new(t("Move left"))).clicked() {
                 action = Some(HeaderAction::Move { field: f.id, by: -1 });
             }
-            if ui.add_enabled(self.position + 1 < self.column_count, egui::Button::new("Move right")).clicked() {
+            if ui.add_enabled(self.position + 1 < self.column_count, egui::Button::new(t("Move right"))).clicked() {
                 action = Some(HeaderAction::Move { field: f.id, by: 1 });
             }
         });
-        if ui.add_enabled(self.column_count > 1, egui::Button::new("Hide column")).clicked() {
+        if ui.add_enabled(self.column_count > 1, egui::Button::new(t("Hide column"))).clicked() {
             action = Some(HeaderAction::Hide(f.id));
         }
         picker_button(ui, self.columns);
@@ -145,18 +146,19 @@ impl HeaderMenu<'_> {
 pub fn picker_button(ui: &mut Ui, columns: &mut Vec<u16>) {
     let config =
         egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    egui::containers::menu::MenuButton::new("Columns").config(config).ui(ui, |ui| picker(ui, columns));
+    egui::containers::menu::MenuButton::new(t("Columns")).config(config).ui(ui, |ui| picker(ui, columns));
 }
 
 /// Checkbox list of all fields, grouped like the detail view. Returns true on change.
 pub fn picker(ui: &mut Ui, columns: &mut Vec<u16>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        if ui.button("Defaults").clicked() {
+        if ui.button(t("Defaults")).clicked() {
             *columns = fields::DEFAULT_COLUMNS.to_vec();
             changed = true;
         }
-        if ui.button("Quality set").on_hover_text("End time, IPs, equipment, codec, loss, delays, MOS").clicked() {
+        if ui.button(t("Quality set")).on_hover_text(t("End time, IPs, equipment, codec, loss, delays, MOS")).clicked()
+        {
             *columns = vec![1, 8, 9, 6, 15, 12, 24, 500, 501, 502, 503];
             changed = true;
         }
@@ -168,10 +170,12 @@ pub fn picker(ui: &mut Ui, columns: &mut Vec<u16>) -> bool {
         groups.sort();
         groups.dedup();
         for g in groups {
-            ui.label(RichText::new(crate::detail::group_title(g)).strong().small());
+            ui.label(RichText::new(i18n::group_title(g)).strong().small());
             for f in fields::FIELDS.iter().filter(|f| f.group == g) {
                 let mut shown = columns.contains(&f.id);
-                let r = ui.checkbox(&mut shown, f.name).on_hover_text(format!("field {} · {}", f.id, f.key));
+                let r = ui
+                    .checkbox(&mut shown, i18n::field_name(f))
+                    .on_hover_text(tf("field {id} · {key}", &[("id", &f.id), ("key", &f.key)]));
                 if r.changed() {
                     if shown {
                         columns.push(f.id);
@@ -203,6 +207,6 @@ fn hint(f: &Field) -> &'static str {
         8 | 9 => "192.168.",
         6 => "NOE-IP",
         15 => "G711A",
-        _ => "value",
+        _ => t("value"),
     }
 }
