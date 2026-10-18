@@ -1,6 +1,6 @@
 [package]
 name = "ipview-rs"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 description = "Analyzer for Alcatel-Lucent OmniPCX Enterprise VoIP tickets (IP*.DAT / .ipv), a rewrite of IPView 2.0.1"
 license = "MIT OR Apache-2.0"
